@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "financial-transaction-resolution": {
+      "command": "/Users/asray/.local/bin/uv",
+      "args": [
+        "--directory",
+        "/Users/asray/Desktop/Code/financial-transaction-resolution-mcp",
+        "run",
+        "python",
+        "-m",
+        "src.server"
+      ]
+    }
+  }
+}
