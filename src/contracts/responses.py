@@ -9,7 +9,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..domain.enums import AccountStatus, AccountType, Confidence, TransactionStatus
+from ..domain.enums import AccountStatus, AccountType, Confidence, DisputeWorkflowStatus, TransactionStatus
 from .common import Money, ToolResponseBase
 
 
@@ -180,3 +180,43 @@ class SynthesisResponse(ToolResponseBase):
     """Envelope for ``synthesize_investigation``."""
 
     data: SynthesisData | None = None
+
+
+class DisputeProposalData(_Payload):
+    """Result of ``propose_dispute_case``. The case is not yet written."""
+
+    workflow_status: DisputeWorkflowStatus
+    masked_account_id: str
+    masked_customer_id: str = Field(description="Masked customer identifier. The customer's name is never returned.")
+    transaction_id: str
+    merchant_display_name: str
+    amount: Money
+    currency: str
+    transaction_date: date
+    reason: str
+    message: str = Field(description="What the human is being asked to approve.")
+
+
+class DisputeProposalResponse(ToolResponseBase):
+    """Envelope for ``propose_dispute_case``."""
+
+    data: DisputeProposalData | None = None
+
+
+class DisputeDecisionData(_Payload):
+    """Result of ``submit_dispute_decision``."""
+
+    workflow_status: DisputeWorkflowStatus
+    masked_account_id: str
+    masked_customer_id: str
+    transaction_id: str
+    case_id: str | None = Field(description="Present only when the human approved and the case was registered.")
+    reason: str
+    decision_note: str | None
+    registered: bool = Field(description="True only when a dispute_cases row was written.")
+
+
+class DisputeDecisionResponse(ToolResponseBase):
+    """Envelope for ``submit_dispute_decision``."""
+
+    data: DisputeDecisionData | None = None

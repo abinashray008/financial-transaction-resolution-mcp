@@ -18,13 +18,17 @@ from ..contracts.requests import (
     GetAccountSummaryRequest,
     GetAuditTraceRequest,
     GetTransactionDetailsRequest,
+    ProposeDisputeCaseRequest,
     ResolveMerchantRequest,
     SearchTransactionsRequest,
+    SubmitDisputeDecisionRequest,
     SynthesizeInvestigationRequest,
 )
 from ..contracts.responses import (
     AccountSummaryResponse,
     AuditTraceResponse,
+    DisputeDecisionResponse,
+    DisputeProposalResponse,
     DuplicateCheckResponse,
     MerchantResolutionResponse,
     SynthesisResponse,
@@ -42,16 +46,27 @@ from ..tools.check_duplicate_charge_tool import check_duplicate_charge as check_
 from ..tools.get_account_summary_tool import get_account_summary as get_account_summary_handler
 from ..tools.get_audit_trace_tool import get_audit_trace as get_audit_trace_handler
 from ..tools.get_transaction_details_tool import get_transaction_details as get_transaction_details_handler
+from ..tools.propose_dispute_case_tool import propose_dispute_case as propose_dispute_case_handler
 from ..tools.resolve_merchant_tool import resolve_merchant as resolve_merchant_handler
 from ..tools.search_transactions_tool import search_transactions as search_transactions_handler
+from ..tools.submit_dispute_decision_tool import (
+    submit_dispute_decision as submit_dispute_decision_handler,
+)
 from ..tools.synthesize_investigation_tool import (
     synthesize_investigation as synthesize_investigation_handler,
 )
 
-# Most tools read only from the local synthetic dataset. Synthesis calls Gemini,
-# so it is annotated separately.
+# Evidence tools read only from the local synthetic dataset. Synthesis calls Gemini.
+# Dispute registration writes only after an explicit human approval.
 READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
 SYNTHESIS = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True)
+DISPUTE_PROPOSE = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
+DISPUTE_WRITE = ToolAnnotations(
+    readOnlyHint=False,
+    idempotentHint=False,
+    destructiveHint=False,
+    openWorldHint=False,
+)
 
 AccountId = Annotated[str, Field(description="Account identifier, for example 'ACCT-0001'.")]
 TransactionId = Annotated[str, Field(description="Transaction identifier, for example 'TXN-0001'.")]
@@ -62,7 +77,7 @@ RequestId = Annotated[
 
 
 def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
-    """Register every read-only tool with the server instance."""
+    """Register every tool with the server instance."""
 
     @mcp.tool(annotations=READ_ONLY)
     def get_account_summary(account_id: AccountId, request_id: RequestId = None) -> AccountSummaryResponse:
@@ -218,6 +233,74 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
                 account_id=account_id,
                 transaction_id=transaction_id,
                 investigation_findings=investigation_findings,
+                request_id=request_id,
+            ),
+        )
+
+    @mcp.tool(annotations=DISPUTE_PROPOSE)
+    def propose_dispute_case(
+        account_id: AccountId,
+        transaction_id: TransactionId,
+        investigation_findings: Annotated[
+            str,
+            Field(
+                description=(
+                    "JSON object collecting the earlier tool envelopes. Required so a dispute "
+                    "cannot be proposed without an investigation."
+                ),
+            ),
+        ],
+        synthesis_summary: Annotated[
+            str,
+            Field(
+                description=("Customer-facing reply from synthesize_investigation that the proposal is based on."),
+            ),
+        ],
+        request_id: RequestId = None,
+    ) -> DisputeProposalResponse:
+        """Start the LangGraph dispute workflow and pause for human approval. Does not write a
+        dispute case. Call this only after synthesize_investigation. Present the proposed case
+        to the end user; if they approve, call submit_dispute_decision with the same request_id.
+        """
+        return propose_dispute_case_handler(
+            container,
+            ProposeDisputeCaseRequest(
+                account_id=account_id,
+                transaction_id=transaction_id,
+                investigation_findings=investigation_findings,
+                synthesis_summary=synthesis_summary,
+                request_id=request_id,
+            ),
+        )
+
+    @mcp.tool(annotations=DISPUTE_WRITE)
+    def submit_dispute_decision(
+        account_id: AccountId,
+        transaction_id: TransactionId,
+        approved: Annotated[
+            bool,
+            Field(description="True to register the case, false to decline without writing a row."),
+        ],
+        request_id: Annotated[
+            str,
+            Field(description="The same correlation id used for propose_dispute_case and the investigation."),
+        ],
+        decision_note: Annotated[
+            str | None,
+            Field(description="Optional human note recorded with the decision."),
+        ] = None,
+    ) -> DisputeDecisionResponse:
+        """Resume the paused LangGraph workflow with the end user's decision. A dispute_cases row
+        is written only when approved is true, and only for the same customer as the account.
+        Declining leaves the database unchanged. This is a synthetic case file, not an issuer ruling.
+        """
+        return submit_dispute_decision_handler(
+            container,
+            SubmitDisputeDecisionRequest(
+                account_id=account_id,
+                transaction_id=transaction_id,
+                approved=approved,
+                decision_note=decision_note,
                 request_id=request_id,
             ),
         )

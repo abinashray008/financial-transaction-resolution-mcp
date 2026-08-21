@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from .enums import AccountStatus, AccountType, TransactionStatus
+from .enums import AccountStatus, AccountType, DisputeCaseStatus, TransactionStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,3 +89,50 @@ class TransactionWithMerchant:
 
     transaction: Transaction
     merchant: Merchant
+
+
+@dataclass(frozen=True, slots=True)
+class DisputeCase:
+    """A human-approved synthetic dispute case file."""
+
+    case_id: str
+    customer_id: str
+    account_id: str
+    transaction_id: str
+    request_id: str
+    reason: str
+    status: DisputeCaseStatus
+    amount: Decimal
+    currency: str
+    merchant_display_name: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DisputeProposal:
+    """A proposed case waiting on an explicit human approval."""
+
+    request_id: str
+    account_id: str
+    transaction_id: str
+    customer_id: str
+    merchant_display_name: str
+    amount: Decimal
+    currency: str
+    transaction_date: date
+    reason: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class DisputeDecision:
+    """Result of resuming the dispute workflow after a human decision."""
+
+    request_id: str
+    account_id: str
+    transaction_id: str
+    customer_id: str
+    workflow_status: str
+    case_id: str | None
+    reason: str
+    decision_note: str | None

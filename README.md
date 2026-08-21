@@ -29,10 +29,12 @@ Every evidence tool is scoped to a single account. Analysis is deterministic and
 same question always produces the same answer and every conclusion names the rule that produced it.
 The host agent supplies judgement; the server supplies facts it cannot invent. The reusable
 `investigate_transaction` prompt sequences that work, then `synthesize_investigation` calls Gemini
-to draft the customer-facing reply.
+to draft the customer-facing reply. After that reply, a LangGraph human-in-the-loop workflow can
+register a synthetic dispute case — but only if the end user explicitly approves.
 
 This is a local demo of MCP server design, layered architecture, PII handling and deterministic
-domain logic. It is not a real dispute system and cannot file, approve or resolve disputes.
+domain logic. It is not a real issuer dispute system. Registering a case writes a row to SQLite; it
+does not file, approve or resolve a dispute with a card network.
 
 ### Use cases
 
@@ -47,7 +49,10 @@ domain logic. It is not a real dispute system and cannot file, approve or resolv
 - **Investigation audit.** Reuse one `request_id` across tool calls and reconstruct the trail with
   `get_audit_trace` (tool names and outcomes only; no PII).
 - **Customer-facing summary.** After evidence is gathered, synthesize a reply with Gemini that
-  follows the selected policy and never claims a dispute was filed.
+  follows the selected policy and never claims an issuer filed a dispute.
+- **Human-approved dispute case.** After synthesis, `propose_dispute_case` pauses a LangGraph
+  workflow. If the end user confirms, `submit_dispute_decision` writes a `dispute_cases` row for
+  that customer.
 
 ## Demo
 
@@ -56,25 +61,28 @@ Run the server from Cursor (or another MCP client) and ask:
 > Customer doesn't recognize the transaction `TXN-SCN-DUP-A` on `ACCT-0001`
 
 That scenario is a same-day double post at Halcyon Electronics. The agent should ask for any missing
-ids, read `policy://disputes/unrecognized-transaction`, gather evidence with the tools, and finish
-with `synthesize_investigation`. A full tool-by-tool walkthrough is in [Example Queries](#example-queries).
+ids, read `policy://disputes/unrecognized-transaction`, gather evidence with the tools, finish
+with `synthesize_investigation`, then — only if you approve — register a synthetic dispute case
+through the LangGraph human-in-the-loop tools. A full tool-by-tool walkthrough is in
+[Example Queries](#example-queries).
 
 A recorded demo video is not included in this repository.
 
 ## Architecture & System Design
 
-The server is a local FastMCP process that speaks MCP over stdio. A client such as Cursor, Claude
-Desktop or the MCP Inspector launches it, exchanges JSON-RPC on stdin/stdout, and receives logs on
-stderr. There is no HTTP listener in this increment.
+The server is a local FastMCP process. Cursor, Claude Desktop or the MCP Inspector can launch it
+over **stdio** (local-trust, no OAuth). For a network listener, start **HTTP**; that path requires
+[Descope](https://www.descope.com/) and validates bearer JWTs at the transport layer. Stdio logs
+still go to stderr so stdout stays the protocol wire.
 
 Layers are strictly separated. Dependencies point inward: the MCP layer knows about handlers,
 handlers know about services and repositories, and the domain knows about nothing else.
 
 ```
         MCP client (Cursor, Claude Desktop, Inspector)
-                          │  stdio
+                          │  stdio  or  HTTP + Descope JWT
 ┌─────────────────────────▼──────────────────────────────────┐
-│ src/server.py            FastMCP app, instructions, stdio   │
+│ src/server.py            FastMCP app, instructions, auth    │
 ├────────────────────────────────────────────────────────────┤
 │ src/routers/             Registration only. Translates MCP  │
 │   tools.py               arguments into request contracts.  │
@@ -104,6 +112,7 @@ handlers know about services and repositories, and the domain knows about nothin
 ├────────────────────────────────────────────────────────────┤
 │ src/security/masking.py  │  src/audit/service.py            │
 │ src/llm/gemini_client.py │  src/observability/tracing.py    │
+│ src/workflows/           LangGraph HITL dispute registration  │
 │ SQLite data/transactions.db  │  Opik (optional agent traces)    │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -125,7 +134,10 @@ the agent to stop and ask the caller — that is the user-feedback gate. The age
 policy resource (`policy://disputes/unrecognized-transaction`, `policy://fees/foreign-transaction`,
 or `policy://fees/late-payment`), calls the evidence tools, and finishes with
 `synthesize_investigation`. Evidence analysis never calls a model. Gemini is used only to draft the
-final customer-facing narrative from the gathered envelopes and the selected policy.
+final customer-facing narrative from the gathered envelopes and the selected policy. If the end user
+then wants a dispute case, `propose_dispute_case` starts a LangGraph graph that interrupts for
+approval; `submit_dispute_decision` resumes it and writes `dispute_cases` only when `approved` is
+true.
 
 The only external API is Google Gemini (`google-genai`, default model `gemini-2.5-pro`), and only
 the synthesis tool needs `GEMINI_API_KEY`. Search, merchant resolution, duplicate detection and
@@ -160,8 +172,9 @@ configuration.
 
 #### Server and registration
 
-- `src/server.py` — FastMCP instance, instructions, stdio entry point.
-- `src/routers/tools.py` — Seven tools with `readOnlyHint` (synthesis uses its own annotation).
+- `src/server.py` — FastMCP instance, instructions, stdio and Descope-authenticated HTTP.
+- `src/routers/tools.py` — Nine tools. Evidence tools and synthesis use `readOnlyHint`;
+  `submit_dispute_decision` is the only write.
 - `src/routers/prompts.py` — `investigate_transaction`.
 - `src/routers/resources.py` — `status://server` and three policy URIs.
 
@@ -169,9 +182,11 @@ configuration.
 
 - `src/tools/` — One handler per tool (`get_account_summary`, `search_transactions`,
   `get_transaction_details`, `resolve_merchant`, `check_duplicate_charge`, `get_audit_trace`,
-  `synthesize_investigation`).
+  `synthesize_investigation`, `propose_dispute_case`, `submit_dispute_decision`).
+- `src/workflows/dispute_case.py` — LangGraph graph: load context, build proposal, interrupt for
+  human approval, persist only on approve.
 - `src/prompts/investigate_transaction_prompt.py` — Agentic workflow text, including the ask-the-caller
-  gate.
+  gate and the post-synthesis human-approval phase.
 - `src/resources/` — Server status plus unrecognized-transaction, foreign-transaction-fee and
   late-payment-fee policies.
 
@@ -187,6 +202,7 @@ configuration.
 
 - `src/app/container.py`, `execution.py`, `presenters.py`, `validators.py`, `data_seed.py`
 - `src/security/masking.py` — Account and card masking.
+- `src/security/descope.py` — Descope well-known URL parsing and `DescopeProvider` construction.
 - `src/audit/service.py` — Append-only sanitized audit events.
 - `src/observability/tracing.py` — Optional Opik traces, Gemini token usage, investigation threads.
 - `src/llm/gemini_client.py` — The only module that calls a model.
@@ -206,7 +222,8 @@ All data is invented for this project. Nothing is scraped or licensed from a fin
 - **Source:** Generated in-repo by `src/app/data_seed.py` via `scripts/generate_data.py`
 - **Storage:** `data/transactions.db` (SQLite; gitignored). Recreate with
   `uv run python scripts/generate_data.py --seed 42`
-- **Format:** SQLite tables `customers`, `accounts`, `merchants`, `transactions`, `audit_events`
+- **Format:** SQLite tables `customers`, `accounts`, `merchants`, `transactions`, `audit_events`,
+  `dispute_cases`
 - **Preprocessing:** None. Tables are dropped and recreated on each run. Dates are anchored to a
   fixed reference date (`2026-06-30`), so the dataset does not drift.
 - **License / attribution:** Original synthetic content under this repository's MIT license.
@@ -234,8 +251,8 @@ Course-required capabilities implemented in this server, with a brief descriptio
 
 | Feature | Description |
 | --- | --- |
-| **MCP server in Python with FastMCP** | `src/server.py` creates a FastMCP app, sets instructions, enables `mask_error_details=True`, and registers tools, prompts and resources. Transport is stdio (`uv run python -m src.server`). |
-| **MCP tools** | Seven tools in `src/tools/`, registered in `src/routers/tools.py`. Evidence tools are read-only and return `{status, request_id, data, error}`. Catalog below. |
+| **MCP server in Python with FastMCP** | `src/server.py` creates a FastMCP app, sets instructions, enables `mask_error_details=True`, and registers tools, prompts and resources. Stdio is the default (`uv run python -m src.server`). HTTP (`--transport http`) requires Descope. |
+| **MCP tools** | Nine tools in `src/tools/`, registered in `src/routers/tools.py`. Evidence tools are read-only and return `{status, request_id, data, error}`. Catalog below. |
 | **MCP prompt with user feedback** | `investigate_transaction` (`src/prompts/investigate_transaction_prompt.py`). If `account_id` or `transaction_id` is missing, the agent must stop and ask the caller before any tool call. If the concern is unclear, it asks one clarifying question, then maps the concern to a policy resource. |
 | **Structured tool inputs and outputs** | Pydantic v2 request/response models in `src/contracts/`. FastMCP generates JSON Schema from typed arguments. |
 | **Synthetic data in SQLite** | Generated dataset in `data/transactions.db` via `scripts/generate_data.py` / `src/app/data_seed.py`. No live financial APIs. |
@@ -257,6 +274,8 @@ Course-required capabilities implemented in this server, with a brief descriptio
 | `check_duplicate_charge` | Rule-based duplicate check with `LOW` / `MEDIUM` / `HIGH` confidence. | `account_id`, `transaction_id` |
 | `get_audit_trace` | Sanitized audit events for a correlation id. | `request_id` |
 | `synthesize_investigation` | Gemini drafts a customer-facing reply from gathered envelopes. Requires `GEMINI_API_KEY`. | `account_id`, `transaction_id`, `investigation_findings` |
+| `propose_dispute_case` | Starts the LangGraph HITL workflow and pauses for approval. Does not write a case. | `account_id`, `transaction_id`, `investigation_findings`, `synthesis_summary` |
+| `submit_dispute_decision` | Resumes the graph. Writes `dispute_cases` only when `approved` is true. | `account_id`, `transaction_id`, `approved`, `request_id` |
 
 ## Custom Features
 
@@ -276,6 +295,8 @@ Features implemented beyond the course minimum, with a brief description of each
 | **Escaped `LIKE` wildcards** | A `%` or `_` in `merchant_query` cannot widen the SQL search. |
 | **Cross-account isolation** | Every transaction query includes `account_id` in `WHERE`. A charge on another account returns the same `TRANSACTION_NOT_FOUND` as a missing id. |
 | **Opik agent observability** | Optional [Opik](https://www.comet.com/docs/opik/) tracing (`src/observability/tracing.py`). MCP tool calls become spans grouped by `request_id`; Gemini calls record token usage and estimated cost. Payloads are sanitized (no names, descriptors or transaction bodies). |
+| **LangGraph human-in-the-loop disputes** | After synthesis, `propose_dispute_case` interrupts a LangGraph graph. `submit_dispute_decision` resumes it. An approved decision inserts a `dispute_cases` row for the same `customer_id` as the account; a decline writes nothing. |
+| **Descope HTTP authentication** | `--transport http` uses FastMCP's `DescopeProvider`. MCP clients register via Dynamic Client Registration and send a Descope JWT. Stdio stays local-trust and does not speak OAuth. |
 
 ## Setup Instructions
 
@@ -289,6 +310,8 @@ Step-by-step setup: clone the repo, install with `uv`, configure `.env`, generat
   `synthesize_investigation` (evidence tools work offline with no API keys)
 - An [Opik / Comet](https://www.comet.com/signup) API key **only if** you want agent traces in the
   Opik UI (optional; the server runs without it)
+- A [Descope](https://www.descope.com/sign-up) project **only if** you want HTTP (`--transport http`).
+  Stdio for Cursor does not need Descope.
 
 ### 1. Clone the repository
 
@@ -306,6 +329,12 @@ uv sync
 ```
 
 This creates `.venv` and installs runtime plus dev dependencies from `pyproject.toml`.
+
+Install git hooks so Ruff linting and formatting run on every commit:
+
+```bash
+uv run pre-commit install
+```
 
 ### 3. Configure environment variables
 
@@ -337,7 +366,18 @@ To start the process yourself (it waits on stdio; it will look idle until a clie
 uv run python -m src.server
 ```
 
-Optional Inspector UI:
+HTTP with Descope (refuses to start unless `DESCOPE_CONFIG_URL` is set):
+
+```bash
+uv run python -m src.server --transport http
+```
+
+The MCP endpoint is `http://127.0.0.1:8000/mcp`. A GET to `http://127.0.0.1:8000/` returns a
+status page so you can confirm the process is up. `/mcp` itself returns **401** until the client
+completes Descope OAuth — that is expected, not a crash. Clients complete OAuth against Descope via
+Dynamic Client Registration, then send the access token as a bearer JWT.
+
+Optional Inspector UI (stdio, no Descope):
 
 ```bash
 uv run fastmcp dev src/server.py
@@ -380,6 +420,14 @@ OPIK_PROJECT_NAME=financial-transaction-resolution
 OPIK_USE_LOCAL=false
 OPIK_URL_OVERRIDE=
 OPIK_ENABLED=true
+
+# Required only for --transport http. Create an MCP Server at
+# https://app.descope.com/mcp-servers with Dynamic Client Registration enabled,
+# then paste its well-known OpenID configuration URL.
+DESCOPE_CONFIG_URL=
+BASE_URL=http://127.0.0.1:8000
+HTTP_HOST=127.0.0.1
+HTTP_PORT=8000
 ```
 
 | Variable | Required to run? | Default | What it does | How to obtain |
@@ -396,6 +444,10 @@ OPIK_ENABLED=true
 | `OPIK_USE_LOCAL` | No | `false` | Send traces to a self-hosted Opik instead of Opik Cloud | `true` if you [run Opik locally](https://www.comet.com/docs/opik/self-host/overview) |
 | `OPIK_URL_OVERRIDE` | With local Opik | _(empty)_ | Opik API URL | Default local API is typically `http://localhost:5173/api` |
 | `OPIK_ENABLED` | No | `true` | Master switch. Tracing still needs `OPIK_API_KEY` or `OPIK_USE_LOCAL=true` | Set `false` to force tracing off |
+| `DESCOPE_CONFIG_URL` | HTTP only | _(empty)_ | Descope MCP Server or inbound-app `.well-known/openid-configuration` URL | [Descope MCP Servers](https://app.descope.com/mcp-servers); enable DCR |
+| `BASE_URL` | HTTP only | `http://127.0.0.1:8000` | Public URL advertised in OAuth protected-resource metadata | Match the URL clients use to reach this server |
+| `HTTP_HOST` | HTTP only | `127.0.0.1` | Bind address for `--transport http` | Use `0.0.0.0` only if you intend to listen beyond loopback |
+| `HTTP_PORT` | HTTP only | `8000` | Bind port for `--transport http` | Choose freely |
 
 **Important:**
 
@@ -431,6 +483,19 @@ uv run python -m src.server
 The server speaks MCP over stdio and waits for a client. All logging goes to stderr, because stdout
 is the protocol wire. Running this in a terminal by itself will look idle; attach an MCP client.
 
+HTTP with Descope (fails fast unless `DESCOPE_CONFIG_URL` is set):
+
+```bash
+uv run python -m src.server --transport http
+```
+
+The MCP endpoint is `http://127.0.0.1:8000/mcp`. Bind address and port come from `HTTP_HOST` /
+`HTTP_PORT` (or `--host` / `--port`). `BASE_URL` must match the URL clients use, including any
+reverse-proxy prefix. Opening `http://127.0.0.1:8000/` in a browser should show a status page;
+`/mcp` is the protocol endpoint and will 401 until OAuth succeeds. Do not use
+`fastmcp run src/server.py --transport http` for this: the module-level `mcp` object is
+unauthenticated for Inspector/stdio; only `python -m src.server --transport http` attaches Descope.
+
 ### Example Queries
 
 Use these from Cursor (or another MCP client) after the server is connected. Reuse one `request_id`
@@ -454,6 +519,9 @@ Is TXN-SCN-DUP-A on ACCT-0001 a duplicate?
 
 # Example 6: contrast — expected repeat, not a duplicate
 Check TXN-SCN-HOLD-02 on ACCT-0001 (hotel hold vs posted settlement)
+
+# Example 7: after synthesis, human-approved dispute registration
+The customer wants a dispute case for TXN-SCN-DUP-A on ACCT-0001 (approve the LangGraph proposal)
 ```
 
 Expected highlights for the duplicate scenario:
@@ -464,6 +532,9 @@ Expected highlights for the duplicate scenario:
 3. `resolve_merchant` → Halcyon Electronics, `HIGH` confidence, `prefix_match`.
 4. `check_duplicate_charge` → `duplicate_likely: true`, `HIGH`, candidate `TXN-SCN-DUP-B`.
 5. `get_audit_trace` → tool names, timestamps, masked account, outcome, duration. No arguments or names.
+6. After synthesis, `propose_dispute_case` → `awaiting_approval` (no `dispute_cases` row yet).
+7. If the user confirms, `submit_dispute_decision(approved=true)` → `DSP-…` registered for the same
+   customer as `ACCT-0001`. A decline writes nothing.
 
 The hotel pair (`TXN-SCN-HOLD-01` / `TXN-SCN-HOLD-02`) returns **LOW** confidence: an authorization
 hold paired with a posted charge is normal settlement, not a duplicate. Monthly subscriptions are
@@ -486,6 +557,9 @@ uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src scripts
+
+# Run every git hook against the whole tree
+uv run pre-commit run --all-files
 ```
 
 ### Connecting from an MCP Client
@@ -543,8 +617,36 @@ Add the following block to the project-level MCP settings file (`.cursor/mcp.jso
   }
   ```
 
-This server does not implement client authentication. Stdio assumes the local user; any connected
-client can query any account in the synthetic dataset.
+This stdio configuration assumes the local user. Any connected client can query any account in the
+synthetic dataset.
+
+### HTTP with Descope
+
+1. Create a free Descope account and open [MCP Servers](https://app.descope.com/mcp-servers).
+2. Create an MCP Server and enable **Dynamic Client Registration (DCR)**.
+3. Copy the well-known URL. FastMCP 3.4 accepts either:
+   - Resource-specific: `https://api.descope.com/v1/apps/agentic/P…/M…/.well-known/openid-configuration`
+   - Project inbound app: `https://api.descope.com/v1/apps/P…/.well-known/openid-configuration`
+4. Set `DESCOPE_CONFIG_URL` and `BASE_URL` in `.env`, then start HTTP:
+
+```bash
+uv run python -m src.server --transport http
+```
+
+5. Point an MCP client at the URL. Cursor example:
+
+```json
+{
+  "mcpServers": {
+    "financial-transaction-resolution": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+The client should discover Descope from protected-resource metadata, register itself (DCR), and
+send a bearer JWT. Unauthenticated HTTP calls are rejected at the transport layer.
 
 ## Testing
 
@@ -553,14 +655,20 @@ uv run pytest              # full suite
 uv run pytest -v           # per-test names
 uv run ruff check .        # lint
 uv run ruff format --check .
+uv run ruff format .       # apply formatter
 uv run mypy src scripts    # strict type checking
+uv run pre-commit run --all-files
 ```
+
+Ruff is configured in `pyproject.toml` (`[tool.ruff]`, `[tool.ruff.lint]`, `[tool.ruff.format]`). After `uv run pre-commit install`, the same checks run automatically on `git commit`.
 
 The suite covers account and card masking, every search filter, invalid date and amount ranges,
 cross-account access, deterministic merchant resolution, duplicate detection across confidence
 categories, audit sanitization, data reproducibility under a fixed seed, MCP tool/prompt/resource
 discovery, Gemini synthesis (with an injected client), Opik observability (with an injected sink),
-and an end-to-end investigation through a real FastMCP `Client`.
+and an end-to-end investigation through a real FastMCP `Client`. Descope wiring is unit-tested
+without contacting a live tenant: HTTP refuses to start without a well-known URL; stdio does not
+require one.
 
 ## Troubleshooting
 
@@ -593,6 +701,20 @@ Desktop or `uv run fastmcp dev src/server.py` instead of typing JSON by hand.
 local instance), `OPIK_ENABLED` is not `false`, and the MCP server was restarted after editing
 `.env`. Tracing never changes tool results; failures are logged to stderr only.
 
+### Issue: `--transport http` looks idle or `http://127.0.0.1:8000/` returned 404
+
+**Solution:** The listener is up when the log says `Uvicorn running on http://127.0.0.1:8000`.
+There is no website at `/mcp`; that path is the MCP protocol and returns **401** until Descope
+OAuth completes. Restart the process after pulling the status-page change, then open
+`http://127.0.0.1:8000/` (JSON/HTML status) or `http://127.0.0.1:8000/health`. Point Cursor at
+`http://127.0.0.1:8000/mcp` with a URL-based MCP config, not the stdio `command` block.
+
+### Issue: `--transport http` exits with `DESCOPE_CONFIG_URL is empty`
+
+**Solution:** Create an MCP Server at [app.descope.com/mcp-servers](https://app.descope.com/mcp-servers)
+with Dynamic Client Registration enabled. Put its `.well-known/openid-configuration` URL in `.env`
+as `DESCOPE_CONFIG_URL`. Stdio (`uv run python -m src.server`) does not need this.
+
 ### Issue: The MCP client cannot start the server
 
 **Solution:** Confirm `uv` is on the client's `PATH`, `cwd` / `--directory` points at this repo,
@@ -603,8 +725,9 @@ protocol session.
 
 This is a course / portfolio project. If you fork it, keep the synthetic-data disclaimer intact and
 do not introduce real customer or card data. Prefer small, tested changes: add a failing test, then
-the fix. Run `uv run pytest`, `uv run ruff check .` and `uv run mypy src scripts` before opening a
-pull request.
+the fix. Install hooks with `uv run pre-commit install`, then run `uv run pytest`,
+`uv run ruff check .`, `uv run ruff format --check .` and `uv run mypy src scripts` before
+opening a pull request.
 
 ## License
 

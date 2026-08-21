@@ -17,10 +17,12 @@ from ..llm.gemini_client import SynthesisClient
 from ..observability.tracing import TracingService, build_tracing_service
 from ..repositories.accounts import AccountRepository
 from ..repositories.audit import AuditRepository
+from ..repositories.disputes import DisputeRepository
 from ..repositories.merchants import MerchantRepository
 from ..repositories.models import Base
 from ..repositories.session import SessionFactory, build_engine, build_session_factory
 from ..repositories.transactions import TransactionRepository
+from ..workflows.dispute_case import DisputeWorkflowRunner
 
 _DATASET_TABLES = frozenset({"customers", "accounts", "merchants", "transactions"})
 
@@ -38,6 +40,8 @@ class Container:
     merchant_resolver: MerchantResolverService
     duplicates: DuplicateChargeService
     tracing: TracingService
+    disputes: DisputeRepository
+    dispute_workflow: DisputeWorkflowRunner
     synthesis: SynthesisClient | None = None
 
     def dataset_ready(self) -> bool:
@@ -53,20 +57,30 @@ def build_container_from_engine(
 ) -> Container:
     """Assemble a container around an existing engine."""
     session_factory = build_session_factory(engine)
-    # The audit table is the only one the server writes to, so it is created on
-    # demand; the read-only tables come from the data generator.
+    # Audit events and registered dispute cases are the only tables the server writes;
+    # they are created on demand. The read-only catalog comes from the data generator.
     Base.metadata.tables["audit_events"].create(bind=engine, checkfirst=True)
+    Base.metadata.tables["dispute_cases"].create(bind=engine, checkfirst=True)
 
+    accounts = AccountRepository(session_factory)
+    transactions = TransactionRepository(session_factory)
+    disputes = DisputeRepository(session_factory)
     return Container(
         engine=engine,
         session_factory=session_factory,
-        accounts=AccountRepository(session_factory),
-        transactions=TransactionRepository(session_factory),
+        accounts=accounts,
+        transactions=transactions,
         merchants=MerchantRepository(session_factory),
         audit=AuditService(AuditRepository(session_factory)),
         merchant_resolver=MerchantResolverService(),
         duplicates=DuplicateChargeService(),
         tracing=tracing or build_tracing_service(),
+        disputes=disputes,
+        dispute_workflow=DisputeWorkflowRunner(
+            accounts=accounts,
+            transactions=transactions,
+            disputes=disputes,
+        ),
         synthesis=synthesis,
     )
 

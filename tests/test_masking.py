@@ -7,12 +7,17 @@ from src.security.masking import (
     MASK_SEGMENT,
     mask_account_id,
     mask_card,
+    mask_customer_id,
     mask_optional_account_id,
 )
 
 
 def test_account_id_keeps_prefix_and_last_four():
     assert mask_account_id("ACCT-0001") == "ACCT-****0001"
+
+
+def test_customer_id_is_masked_the_same_way():
+    assert mask_customer_id("CUST-0001") == "CUST-****0001"
 
 
 def test_account_id_hides_everything_but_the_last_four():

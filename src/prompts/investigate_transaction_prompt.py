@@ -1,11 +1,12 @@
 """The ``investigate_transaction`` agentic workflow template.
 
 This prompt tells the host agent how to chain the read-only evidence tools,
-apply the matching synthetic policy resource, and finish with
+apply the matching synthetic policy resource, finish with
 ``synthesize_investigation``, which calls Gemini to draft the customer-facing
-reply. The host still decides each tool call; the server does not autonomously
-loop. The only investigation identifiers are ``account_id`` and
-``transaction_id``.
+reply, and then run a LangGraph human-in-the-loop dispute workflow if the
+cardholder still wants a case filed. The host still decides each tool call; the
+server does not autonomously loop. The only investigation identifiers are
+``account_id`` and ``transaction_id``.
 """
 
 DISCLAIMER = (
@@ -56,8 +57,8 @@ def investigate_transaction_prompt(
 
 Work as an agent. Reuse one `request_id` across every tool call in this investigation so the trail is
 auditable. After each tool response, decide the next action from the evidence — do not skip ahead on
-incomplete data. Call only the read-only tools and policy resources this server exposes. The only
-identifiers you may use are `account_id` and `transaction_id`.
+incomplete data. Call only the tools and policy resources this server exposes. The only identifiers
+you may use are `account_id` and `transaction_id`.
 
 ### Phase 0 — confirm identifiers with the caller
 
@@ -122,13 +123,29 @@ steps that are still possible. Do not invent data a tool declined to return.
    answer. Do not rewrite it into a contradictory story. You may add a short preface noting that the
    reply was synthesized from the tool evidence and the selected policy.
 
+### Phase D — human-in-the-loop dispute registration
+
+8. After the synthesis reply has been shown, ask the end user whether they want a dispute case
+   registered for this charge. Do not skip this question. Do not assume approval.
+9. If they decline or do not answer, stop. Do not call `propose_dispute_case` or
+   `submit_dispute_decision`.
+10. If they want a case, call `propose_dispute_case` once with the same `account_id`,
+    `transaction_id`, `request_id`, the investigation findings JSON, and the `customer_response` as
+    `synthesis_summary`. Present the proposed case (merchant, amount, reason, masked customer id) and
+    ask them to confirm.
+11. If they confirm, call `submit_dispute_decision` with `approved=true` and the same `request_id`.
+    If they refuse, call it with `approved=false`. Only an `approved=true` response writes a row to
+    `dispute_cases` for that customer. Tell the user the `case_id` when one is returned.
+12. Never claim that a card network or issuer approved, filed, or resolved a dispute. Registration
+    only opens a synthetic case file.
+
 ### Hard constraints
 
 - Apply the selected policy's prohibited_actions strictly.
-- Never state or imply that a dispute has been approved, filed, submitted or resolved. This server
-  cannot take any such action.
-- Never attempt a write operation. Every tool is read-only; if the customer asks for a change, say it
-  is out of scope for this investigation.
+- Never state or imply that a dispute has been approved, filed, submitted or resolved by an issuer.
+  `submit_dispute_decision` with `approved=true` only registers a synthetic case file.
+- Never call `submit_dispute_decision` with `approved=true` unless the end user explicitly confirmed
+  the proposed case in this conversation.
 - Prefer tool facts over your own guesses. If evidence is incomplete, say what is missing instead of
   filling gaps.
 - Never invent `account_id` or `transaction_id` values. Ask the caller when they are missing.

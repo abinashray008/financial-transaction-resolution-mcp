@@ -23,16 +23,16 @@ def register_mcp_prompts(mcp: FastMCP) -> None:
             str,
             Field(
                 description=(
-                    "Transaction under investigation, for example 'TXN-SCN-DUP-A'. "
-                    "Ask the caller if unknown."
+                    "Transaction under investigation, for example 'TXN-SCN-DUP-A'. Ask the caller if unknown."
                 ),
             ),
         ] = "",
     ) -> str:
-        """Structured, read-only agentic workflow for investigating a card transaction: ask for any
+        """Structured agentic workflow for investigating a card transaction: ask for any
         missing account_id or transaction_id, select and read the matching policy resource for the
-        customer's concern, gather evidence, then call `synthesize_investigation` so Gemini can draft
-        the customer-facing reply from the tool evidence and policy.
+        customer's concern, gather evidence, call `synthesize_investigation` so Gemini can draft
+        the customer-facing reply, then if the end user wants a case run the LangGraph
+        human-in-the-loop tools (`propose_dispute_case`, `submit_dispute_decision`).
         """
         return build_investigation_prompt(
             account_id=account_id,

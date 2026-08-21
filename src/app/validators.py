@@ -15,6 +15,8 @@ TRANSACTION_ID_PATTERN = re.compile(r"^TXN-[A-Z0-9][A-Z0-9-]{0,40}$")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 MAX_DESCRIPTOR_LENGTH = 128
 MAX_FINDINGS_LENGTH = 100_000
+MAX_SYNTHESIS_SUMMARY_LENGTH = 20_000
+MAX_DECISION_NOTE_LENGTH = 500
 
 
 def validate_account_id(value: str) -> str:
@@ -70,4 +72,28 @@ def validate_investigation_findings(value: str) -> str:
         raise InvalidInputError("investigation_findings must include at least one tool result.")
     if isinstance(parsed, list) and not parsed:
         raise InvalidInputError("investigation_findings must include at least one tool result.")
+    return candidate
+
+
+def validate_synthesis_summary(value: str) -> str:
+    """Require the post-synthesis narrative that the dispute proposal is based on."""
+    candidate = value.strip()
+    if not candidate:
+        raise InvalidInputError("synthesis_summary must not be blank.")
+    if len(candidate) > MAX_SYNTHESIS_SUMMARY_LENGTH:
+        raise InvalidInputError(
+            f"synthesis_summary must be at most {MAX_SYNTHESIS_SUMMARY_LENGTH} characters.",
+        )
+    return candidate
+
+
+def validate_decision_note(value: str | None) -> str | None:
+    """Optional human note attached to an approve or decline decision."""
+    if value is None:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if len(candidate) > MAX_DECISION_NOTE_LENGTH:
+        raise InvalidInputError(f"decision_note must be at most {MAX_DECISION_NOTE_LENGTH} characters.")
     return candidate

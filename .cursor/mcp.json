@@ -1,15 +1,7 @@
 {
   "mcpServers": {
-    "financial-transaction-resolution": {
-      "command": "/Users/asray/.local/bin/uv",
-      "args": [
-        "--directory",
-        "/Users/asray/Desktop/Code/financial-transaction-resolution-mcp",
-        "run",
-        "python",
-        "-m",
-        "src.server"
-      ]
+    "financial-transaction-resolution-http": {
+      "url": "http://127.0.0.1:8000/mcp"
     }
   }
 }

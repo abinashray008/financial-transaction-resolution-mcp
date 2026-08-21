@@ -13,14 +13,15 @@ Dependencies point inward. Nothing in `domain/` imports from `contracts/`, `repo
 
 | Layer | Directory | Responsibility | May depend on |
 | --- | --- | --- | --- |
-| Transport | `src/server.py` | Build the FastMCP app, set instructions, run stdio. | Routers, container, config |
+| Transport | `src/server.py` | Build the FastMCP app, set instructions, run stdio or Descope-authenticated HTTP. | Routers, container, config, `src/security/descope.py` |
 | Registration | `src/routers/` | Declare tools, prompts and resources. Translate MCP arguments into request contracts. | Handlers, contracts |
 | Handlers | `src/tools/` | Validate identifiers, call a service or repository, present the result. | App, contracts, domain |
-| Application | `src/app/` | Cross-cutting execution, composition root, validators, presenters, data generation. | Contracts, domain, repositories, audit, security |
+| Workflows | `src/workflows/` | LangGraph HITL dispute registration (`interrupt` / `Command`). | Domain, repositories |
+| Application | `src/app/` | Cross-cutting execution, composition root, validators, presenters, data generation. | Contracts, domain, repositories, audit, security, workflows |
 | Contracts | `src/contracts/` | Pydantic request and response models and the shared envelope. | Domain enums and error codes |
 | Domain | `src/domain/` | Models, validated criteria, analysis services, error taxonomy. | Nothing else in the project |
 | Persistence | `src/repositories/` | SQLAlchemy tables, sessions, account-scoped queries, row mapping. | Domain |
-| Cross-cutting | `src/security/`, `src/audit/`, `src/observability/`, `src/utils/`, `src/config/` | Masking, audit writes, Opik traces, logging, settings. | Domain, repositories |
+| Cross-cutting | `src/security/`, `src/audit/`, `src/observability/`, `src/utils/`, `src/config/` | Masking, Descope HTTP auth, audit writes, Opik traces, logging, settings. | Domain, repositories |
 
 ## Request lifecycle
 
@@ -79,8 +80,8 @@ services are constructed. `create_mcp_server()` accepts one, so tests build a co
 temporary SQLite file and drive the whole stack — routers included — without touching the real
 dataset. Handlers receive the container as their first argument rather than importing globals.
 
-Repositories take a `sessionmaker` and open a short-lived session per call. With stdio and SQLite
-that is simple and safe; there is no ambient session to leak between requests.
+Repositories take a `sessionmaker` and open a short-lived session per call. With stdio or a single
+HTTP listener plus SQLite that is simple and safe; there is no ambient session to leak between requests.
 
 ## Data model
 
@@ -90,7 +91,8 @@ that is simple and safe; there is no ambient session to leak between requests.
 | `accounts` | Card accounts | `card_last_four` only; no PAN exists anywhere |
 | `merchants` | Merchant catalog | `descriptor_patterns` is a JSON array of billing fragments |
 | `transactions` | Card transactions | `amount_minor` is integer cents |
-| `audit_events` | Sanitized tool invocations | The only table the server writes |
+| `audit_events` | Sanitized tool invocations | Written on every tool call |
+| `dispute_cases` | Human-approved synthetic case files | Written only after LangGraph HITL approval |
 
 The domain sees frozen dataclasses (`src/domain/models.py`), never ORM rows. `src/repositories/mappers.py`
 is the only translation point.
@@ -105,6 +107,15 @@ string.
 Both analysis services are pure: they take domain objects and return a verdict. No I/O, no clock, no
 randomness, no model calls. Customer-facing narrative synthesis lives outside the domain, in
 `src/llm/` and the `synthesize_investigation` tool.
+
+**Human-in-the-loop dispute registration.** After synthesis, `propose_dispute_case` runs a LangGraph
+graph (`src/workflows/dispute_case.py`) with an `InMemorySaver` checkpointer. The graph loads the
+account-scoped transaction, builds a proposed reason from stored facts plus the synthesis summary,
+then calls `interrupt()`. That pause is the human gate: no `dispute_cases` row exists yet.
+`submit_dispute_decision` resumes the same `request_id` thread with `Command(resume=…)`. Only
+`approved=true` inserts a row, and that row's `customer_id` is taken from the account — never from
+the caller. A decline ends the graph without a write. The customer's name never enters graph state
+or the MCP response.
 
 **`MerchantResolverService`** normalizes a descriptor (upper-case, strip punctuation, drop leading
 aggregator prefixes such as `SQ *`, drop store numbers of three or more digits, drop noise tokens like
@@ -140,6 +151,12 @@ subscription scenarios.
 
 ## Security boundaries
 
+**Descope authenticates HTTP, not stdio.** `--transport http` constructs FastMCP's
+`DescopeProvider` (`src/security/descope.py`) from `DESCOPE_CONFIG_URL` and `BASE_URL`. Unauthenticated
+requests are rejected at the transport layer before any tool runs. Stdio and in-process tests do not
+attach the provider: OAuth DCR is not a stdio protocol. HTTP refuses to bind if the well-known URL
+is missing or not a Descope MCP Server / inbound-app URL.
+
 **Account scoping is structural.** Every transaction query in `src/repositories/transactions.py`
 carries `account_id` in its `WHERE` clause. There is no "fetch by id, then check ownership" path,
 because that shape is one careless refactor away from a leak.
@@ -167,6 +184,10 @@ truncated.
 | `TRANSACTION_NOT_FOUND` | Transaction handlers | That no such transaction exists **on this account** |
 | `INVALID_DATE_RANGE` | `TransactionSearchCriteria` | That start is after end |
 | `INVALID_AMOUNT_RANGE` | `TransactionSearchCriteria`, `DuplicateCheckCriteria` | That the range is impossible |
+| `SYNTHESIS_UNAVAILABLE` | Synthesis handler | Gemini is not configured or failed |
+| `DISPUTE_ALREADY_EXISTS` | Dispute workflow | A case is already registered for this charge |
+| `DISPUTE_WORKFLOW_NOT_FOUND` | Dispute workflow | No paused proposal for this `request_id` and account |
+| `DISPUTE_NOT_AWAITING_APPROVAL` | Dispute workflow | The graph is not waiting on a human decision |
 | `INTERNAL_ERROR` | `execute_tool` fallbacks | A generic message; detail goes to stderr |
 
 FastMCP is additionally configured with `mask_error_details=True`, so an exception escaping the
@@ -180,7 +201,7 @@ envelope still cannot carry internals to a client.
 | Handler | Every tool against a seeded temporary database, including all error codes |
 | Isolation | Cross-account access from both directions, plus indistinguishability of foreign and missing ids |
 | Data | Determinism under a fixed seed, idempotent regeneration, no date drift |
-| Protocol | Tool, prompt and resource discovery, annotations, schemas, and a full investigation through a real `Client` |
+| Protocol | Tool, prompt and resource discovery, annotations, schemas, a full investigation, HITL dispute registration through a real `Client`, and Descope HTTP wiring without a live tenant |
 
 Tests never reach for module-level globals; they build a `Container` and inject it, which is the same
 seam `create_mcp_server()` uses.

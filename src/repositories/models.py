@@ -6,7 +6,7 @@ frozen dataclasses in :mod:`src.domain.models`.
 
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -71,3 +71,20 @@ class AuditEventRow(Base):
     account_id_masked: Mapped[str | None] = mapped_column(String(32), nullable=True)
     outcome: Mapped[str] = mapped_column(String(32))
     duration_ms: Mapped[int] = mapped_column(Integer)
+
+
+class DisputeCaseRow(Base):
+    __tablename__ = "dispute_cases"
+    __table_args__ = (UniqueConstraint("account_id", "transaction_id", name="uq_dispute_account_transaction"),)
+
+    case_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(32), ForeignKey("customers.customer_id"), index=True)
+    account_id: Mapped[str] = mapped_column(String(32), ForeignKey("accounts.account_id"), index=True)
+    transaction_id: Mapped[str] = mapped_column(String(48), index=True)
+    request_id: Mapped[str] = mapped_column(String(64), index=True)
+    reason: Mapped[str] = mapped_column(String(2000))
+    status: Mapped[str] = mapped_column(String(24))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    merchant_display_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime)

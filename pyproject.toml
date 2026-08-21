@@ -1,26 +1,28 @@
 [project]
 name = "financial-transaction-resolution-mcp"
 version = "0.1.0"
-description = "Read-only MCP server for investigating synthetic financial card transactions"
+description = "MCP server for investigating synthetic financial card transactions and registering human-approved dispute cases"
 readme = "README.md"
 requires-python = "==3.14.0"
 license = { text = "MIT" }
 dependencies = [
-    "fastmcp>=2.14.0",
+    "fastmcp>=3.4.0",
     "google-genai>=1.0.0",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "sqlalchemy>=2.0.36",
     "python-dotenv>=1.0.1",
     "opik>=1.0.0",
+    "langgraph>=1.0.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.4.0",
     "pytest-asyncio>=1.0.0",
-    "ruff>=0.9.0",
+    "ruff>=0.16.3",
     "mypy>=1.14.0",
+    "pre-commit>=4.3.0",
 ]
 
 [build-system]
@@ -33,9 +35,38 @@ packages = ["src"]
 [tool.ruff]
 target-version = "py314"
 line-length = 120
+src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
-select = ["F", "E", "I", "UP", "B", "SIM"]
+select = [
+    "F",      # Pyflakes
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "ASYNC",  # flake8-async
+    "C4",     # flake8-comprehensions
+    "PIE",    # flake8-pie
+    "RUF",    # Ruff-specific
+]
+ignore = [
+    "E501",  # line length is enforced by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**/*.py" = ["E402"]  # sys.path insert before src imports
+"tests/**/*.py" = ["E402"]  # env vars set before third-party imports
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
 
 [tool.mypy]
 python_version = "3.14"
@@ -47,7 +78,7 @@ module = "tests.*"
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = ["google", "google.*", "opik", "opik.*"]
+module = ["google", "google.*", "opik", "opik.*", "langgraph", "langgraph.*", "langchain_core", "langchain_core.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

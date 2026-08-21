@@ -80,6 +80,31 @@ class Settings(BaseSettings):
         alias="OPIK_ENABLED",
         description="Master switch. Tracing still requires OPIK_API_KEY or OPIK_USE_LOCAL.",
     )
+    descope_config_url: str = Field(
+        default="",
+        alias="DESCOPE_CONFIG_URL",
+        description=("Descope MCP Server or inbound-app OpenID configuration URL. Required for HTTP transport."),
+    )
+    base_url: str = Field(
+        default="http://127.0.0.1:8000",
+        alias="BASE_URL",
+        description="Public URL of this MCP server, advertised in OAuth protected-resource metadata.",
+    )
+    http_host: str = Field(
+        default="127.0.0.1",
+        alias="HTTP_HOST",
+        description="Bind address for HTTP transport.",
+    )
+    http_port: int = Field(
+        default=8000,
+        alias="HTTP_PORT",
+        description="Bind port for HTTP transport.",
+    )
+
+    @property
+    def descope_configured(self) -> bool:
+        """Whether a Descope well-known URL is present."""
+        return bool(self.descope_config_url.strip())
 
     @property
     def resolved_database_path(self) -> Path:

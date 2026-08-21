@@ -1,9 +1,9 @@
 """Row-to-domain mapping."""
 
-from ..domain.enums import AccountStatus, AccountType, TransactionStatus
-from ..domain.models import Account, Customer, Merchant, Transaction
+from ..domain.enums import AccountStatus, AccountType, DisputeCaseStatus, TransactionStatus
+from ..domain.models import Account, Customer, DisputeCase, Merchant, Transaction
 from ..domain.money import from_minor_units
-from .models import AccountRow, CustomerRow, MerchantRow, TransactionRow
+from .models import AccountRow, CustomerRow, DisputeCaseRow, MerchantRow, TransactionRow
 
 
 def to_customer(row: CustomerRow) -> Customer:
@@ -49,4 +49,20 @@ def to_transaction(row: TransactionRow) -> Transaction:
         status=TransactionStatus(row.status),
         card_present=row.card_present,
         recurring=row.recurring,
+    )
+
+
+def to_dispute_case(row: DisputeCaseRow) -> DisputeCase:
+    return DisputeCase(
+        case_id=row.case_id,
+        customer_id=row.customer_id,
+        account_id=row.account_id,
+        transaction_id=row.transaction_id,
+        request_id=row.request_id,
+        reason=row.reason,
+        status=DisputeCaseStatus(row.status),
+        amount=from_minor_units(row.amount_minor),
+        currency=row.currency,
+        merchant_display_name=row.merchant_display_name,
+        created_at=row.created_at,
     )

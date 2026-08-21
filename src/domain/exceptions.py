@@ -17,6 +17,9 @@ class ErrorCode(StrEnum):
     INVALID_DATE_RANGE = "INVALID_DATE_RANGE"
     INVALID_AMOUNT_RANGE = "INVALID_AMOUNT_RANGE"
     SYNTHESIS_UNAVAILABLE = "SYNTHESIS_UNAVAILABLE"
+    DISPUTE_ALREADY_EXISTS = "DISPUTE_ALREADY_EXISTS"
+    DISPUTE_WORKFLOW_NOT_FOUND = "DISPUTE_WORKFLOW_NOT_FOUND"
+    DISPUTE_NOT_AWAITING_APPROVAL = "DISPUTE_NOT_AWAITING_APPROVAL"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -83,3 +86,21 @@ class SynthesisUnavailableError(DomainError):
     """Gemini synthesis could not run (missing key, empty reply, or provider failure)."""
 
     code = ErrorCode.SYNTHESIS_UNAVAILABLE
+
+
+class DisputeAlreadyExistsError(DomainError):
+    """A dispute case is already registered for this account and transaction."""
+
+    code = ErrorCode.DISPUTE_ALREADY_EXISTS
+
+
+class DisputeWorkflowNotFoundError(DomainError):
+    """No paused dispute workflow exists for this request and account pair."""
+
+    code = ErrorCode.DISPUTE_WORKFLOW_NOT_FOUND
+
+
+class DisputeNotAwaitingApprovalError(DomainError):
+    """The dispute workflow is not waiting for a human decision."""
+
+    code = ErrorCode.DISPUTE_NOT_AWAITING_APPROVAL

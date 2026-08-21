@@ -28,10 +28,13 @@ def get_server_status(container: Container) -> dict[str, Any]:
     return {
         "server_name": settings.server_name,
         "server_version": settings.server_version,
-        "read_only": True,
+        "read_only_evidence_tools": True,
+        "dispute_registration": True,
         "dataset_ready": dataset_ready,
         "transaction_count": transaction_count,
         "merchant_count": merchant_count,
+        "descope_configured": settings.descope_configured,
+        "http_auth": "descope" if settings.descope_configured else "not_configured",
         "data_disclaimer": (
             "All data served here is fictional and synthetically generated. This project is not "
             "affiliated with or representative of any financial institution."

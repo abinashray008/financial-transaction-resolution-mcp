@@ -41,3 +41,17 @@ class AuditOutcome(StrEnum):
 
     SUCCESS = "success"
     ERROR = "error"
+
+
+class DisputeWorkflowStatus(StrEnum):
+    """Where a human-in-the-loop dispute registration graph currently sits."""
+
+    AWAITING_APPROVAL = "awaiting_approval"
+    REGISTERED = "registered"
+    DECLINED = "declined"
+
+
+class DisputeCaseStatus(StrEnum):
+    """Lifecycle of a registered synthetic dispute case file."""
+
+    REGISTERED = "registered"

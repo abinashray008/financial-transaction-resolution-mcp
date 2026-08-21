@@ -17,7 +17,10 @@ EXPECTED_TOOLS = {
     "check_duplicate_charge",
     "get_audit_trace",
     "synthesize_investigation",
+    "propose_dispute_case",
+    "submit_dispute_decision",
 }
+WRITE_TOOLS = {"submit_dispute_decision"}
 
 
 @pytest.fixture
@@ -32,12 +35,15 @@ async def test_every_tool_is_discoverable(server):
     assert {tool.name for tool in tools} == EXPECTED_TOOLS
 
 
-async def test_every_tool_is_annotated_read_only(server):
+async def test_evidence_tools_are_annotated_read_only(server):
     async with Client(server) as client:
         tools = await client.list_tools()
 
     for tool in tools:
         assert tool.annotations is not None, f"{tool.name} has no annotations"
+        if tool.name in WRITE_TOOLS:
+            assert tool.annotations.readOnlyHint is False, f"{tool.name} should be writable"
+            continue
         assert tool.annotations.readOnlyHint is True, f"{tool.name} is not marked read-only"
         if tool.name == "synthesize_investigation":
             assert tool.annotations.openWorldHint is True
@@ -82,13 +88,16 @@ async def test_the_prompt_renders_the_investigation_workflow(server):
     assert "get_account_summary" in rendered
     assert "check_duplicate_charge" in rendered
     assert "synthesize_investigation" in rendered
+    assert "propose_dispute_case" in rendered
+    assert "submit_dispute_decision" in rendered
     assert "Operating loop" in rendered
+    assert "Phase D" in rendered
     assert "policy://disputes/unrecognized-transaction" in rendered
     assert "policy://fees/foreign-transaction" in rendered
     assert "policy://fees/late-payment" in rendered
     assert "selected_policy_uri" in rendered
     assert "fictional" in rendered
-    assert "Never attempt a write operation" in rendered
+    assert "explicitly confirmed" in rendered
 
 
 async def test_the_prompt_asks_when_transaction_id_is_missing(server):
@@ -133,16 +142,17 @@ async def test_the_status_resource_reports_a_ready_dataset(server):
         "policy://fees/late-payment",
     }
     status = json.loads(contents[0].text)
-    assert status["read_only"] is True
+    assert status["read_only_evidence_tools"] is True
+    assert status["dispute_registration"] is True
     assert status["dataset_ready"] is True
     assert status["merchant_count"] == 75
+    assert status["http_auth"] in {"descope", "not_configured"}
+    assert isinstance(status["descope_configured"], bool)
 
 
 async def test_policy_resources_return_synthetic_guidance(server):
     async with Client(server) as client:
-        unrecognized = json.loads(
-            (await client.read_resource("policy://disputes/unrecognized-transaction"))[0].text
-        )
+        unrecognized = json.loads((await client.read_resource("policy://disputes/unrecognized-transaction"))[0].text)
         foreign_fee = json.loads((await client.read_resource("policy://fees/foreign-transaction"))[0].text)
         late_fee = json.loads((await client.read_resource("policy://fees/late-payment"))[0].text)
 
@@ -250,6 +260,35 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
                 "request_id": request_id,
             },
         )
+        findings = json.dumps(
+            {
+                "get_account_summary": summary.structured_content,
+                "search_transactions": search.structured_content,
+                "get_transaction_details": details.structured_content,
+                "resolve_merchant": merchant.structured_content,
+                "check_duplicate_charge": duplicate.structured_content,
+            }
+        )
+        proposed = await client.call_tool(
+            "propose_dispute_case",
+            {
+                "account_id": SCENARIO_ACCOUNT,
+                "transaction_id": "TXN-SCN-DUP-A",
+                "investigation_findings": findings,
+                "synthesis_summary": synthesized.structured_content["data"]["customer_response"],
+                "request_id": request_id,
+            },
+        )
+        decided = await client.call_tool(
+            "submit_dispute_decision",
+            {
+                "account_id": SCENARIO_ACCOUNT,
+                "transaction_id": "TXN-SCN-DUP-A",
+                "approved": True,
+                "request_id": request_id,
+                "decision_note": "Customer confirmed the duplicate posting.",
+            },
+        )
         audit = await client.call_tool("get_audit_trace", {"request_id": request_id})
 
     # Step 1: minimum account context, with no customer name anywhere.
@@ -284,9 +323,26 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
     assert "duplicate likely" in reply["customer_response"]
     assert reply["model_name"] == "gemini-2.5-pro"
 
-    # Step 7: the whole investigation is auditable under one correlation id.
+    # Step 7: LangGraph pauses for human approval; no case is written yet.
+    proposal = proposed.structured_content["data"]
+    assert proposal["workflow_status"] == "awaiting_approval"
+    assert proposal["transaction_id"] == "TXN-SCN-DUP-A"
+    assert "Lindholm" not in json.dumps(proposed.structured_content)
+
+    # Step 8: after explicit approval, register a case for the same customer.
+    decision = decided.structured_content["data"]
+    assert decision["registered"] is True
+    assert decision["case_id"].startswith("DSP-")
+    container = build_container_from_engine(engine)
+    stored = container.disputes.get_for_account(SCENARIO_ACCOUNT, "TXN-SCN-DUP-A")
+    account = container.accounts.get_with_customer_state(SCENARIO_ACCOUNT)
+    assert stored is not None
+    assert account is not None
+    assert stored.customer_id == account.account.customer_id
+
+    # Step 9: the whole investigation is auditable under one correlation id.
     trace = audit.structured_content["data"]
-    assert trace["event_count"] == 6
+    assert trace["event_count"] == 8
     assert [event["tool_name"] for event in trace["events"]] == [
         "get_account_summary",
         "search_transactions",
@@ -294,6 +350,8 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
         "resolve_merchant",
         "check_duplicate_charge",
         "synthesize_investigation",
+        "propose_dispute_case",
+        "submit_dispute_decision",
     ]
     assert "HALCYON" not in json.dumps(trace)
 

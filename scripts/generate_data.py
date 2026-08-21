@@ -12,9 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.app.data_seed import DEFAULT_SEED, seed_database  # noqa: E402
-from src.config.settings import settings  # noqa: E402
-from src.repositories.session import build_engine  # noqa: E402
+from src.app.data_seed import DEFAULT_SEED, seed_database
+from src.config.settings import settings
+from src.repositories.session import build_engine
 
 
 def main() -> None:

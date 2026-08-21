@@ -32,9 +32,21 @@ def mask_account_id(account_id: str) -> str:
 
     ``ACCT-0001`` becomes ``ACCT-****0001``.
     """
-    cleaned = _sanitize(account_id)
+    return _mask_prefixed_id(account_id)
+
+
+def mask_customer_id(customer_id: str) -> str:
+    """Mask a customer identifier. Names are never used or returned.
+
+    ``CUST-0001`` becomes ``CUST-****0001``.
+    """
+    return _mask_prefixed_id(customer_id)
+
+
+def _mask_prefixed_id(identifier: str) -> str:
+    cleaned = _sanitize(identifier)
     if not cleaned:
-        raise ValueError("Cannot mask an empty account identifier.")
+        raise ValueError("Cannot mask an empty identifier.")
 
     prefix, separator, body = cleaned.rpartition("-")
     if not separator:

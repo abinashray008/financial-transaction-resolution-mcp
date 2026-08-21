@@ -86,3 +86,31 @@ class SynthesizeInvestigationRequest(_Request):
             "optionally the audit trace)."
         ),
     )
+
+
+class ProposeDisputeCaseRequest(_Request):
+    """Input for ``propose_dispute_case``."""
+
+    account_id: str
+    transaction_id: str
+    investigation_findings: str = Field(
+        description=(
+            "JSON object collecting the earlier tool envelopes. Required so a dispute "
+            "cannot be proposed without an investigation."
+        ),
+    )
+    synthesis_summary: str = Field(
+        description="Customer-facing reply from synthesize_investigation that the proposal is based on.",
+    )
+
+
+class SubmitDisputeDecisionRequest(_Request):
+    """Input for ``submit_dispute_decision``."""
+
+    account_id: str
+    transaction_id: str
+    approved: bool = Field(description="True to register the case, false to decline without writing.")
+    decision_note: str | None = Field(
+        default=None,
+        description="Optional human note recorded with the decision.",
+    )

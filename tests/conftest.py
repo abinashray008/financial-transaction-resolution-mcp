@@ -11,8 +11,8 @@ from collections.abc import Iterator
 
 os.environ["OPIK_TRACK_DISABLE"] = "true"
 
-import pytest  # noqa: E402
-from sqlalchemy import Engine  # noqa: E402
+import pytest
+from sqlalchemy import Engine
 
 from src.app.container import Container, build_container_from_engine
 from src.app.data_seed import DEFAULT_SEED, seed_database
