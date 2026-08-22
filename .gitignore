@@ -8,6 +8,8 @@ venv/
 data/*.db
 data/*.db-journal
 data/*.sqlite3
+data/*.db-*
+data/*.sqlite3-*
 
 # Runtime logs
 *.log
