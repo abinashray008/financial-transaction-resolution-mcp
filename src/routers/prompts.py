@@ -32,7 +32,8 @@ def register_mcp_prompts(mcp: FastMCP) -> None:
         missing account_id or transaction_id, select and read the matching policy resource for the
         customer's concern, gather evidence, call `synthesize_investigation` so Gemini can draft
         the customer-facing reply, then if the end user wants a case run the LangGraph
-        human-in-the-loop tools (`propose_dispute_case`, `submit_dispute_decision`).
+        human-in-the-loop tools (`create_dispute_draft`, then `submit_dispute_case` with a minted
+        approval_id).
         """
         return build_investigation_prompt(
             account_id=account_id,

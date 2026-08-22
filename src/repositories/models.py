@@ -88,3 +88,18 @@ class DisputeCaseRow(Base):
     currency: Mapped[str] = mapped_column(String(3))
     merchant_display_name: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class ApprovalRecordRow(Base):
+    __tablename__ = "approval_records"
+
+    approval_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), index=True)
+    draft_hash: Mapped[str] = mapped_column(String(64))
+    reviewer_id: Mapped[str] = mapped_column(String(128))
+    decision: Mapped[str] = mapped_column(String(16))
+    decision_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    decided_at: Mapped[datetime] = mapped_column(DateTime)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

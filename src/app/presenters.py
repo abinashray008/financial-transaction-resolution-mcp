@@ -6,9 +6,10 @@ an unmasked identifier.
 
 from ..contracts.responses import (
     AccountSummaryData,
+    ApprovalRecordData,
     AuditEventView,
     DisputeDecisionData,
-    DisputeProposalData,
+    DisputeDraftData,
     MerchantData,
     TransactionSummary,
 )
@@ -16,6 +17,7 @@ from ..domain.enums import DisputeWorkflowStatus
 from ..domain.models import (
     AccountWithCustomerState,
     AuditEvent,
+    DisputeApproval,
     DisputeDecision,
     DisputeProposal,
     Merchant,
@@ -78,10 +80,10 @@ def to_audit_event_view(event: AuditEvent) -> AuditEventView:
     )
 
 
-def to_dispute_proposal(proposal: DisputeProposal) -> DisputeProposalData:
-    """Present a proposed case without customer names or unmasked ids."""
-    return DisputeProposalData(
-        workflow_status=DisputeWorkflowStatus.AWAITING_APPROVAL,
+def to_dispute_draft(proposal: DisputeProposal) -> DisputeDraftData:
+    """Present a PENDING_REVIEW draft without customer names or unmasked ids."""
+    return DisputeDraftData(
+        status=DisputeWorkflowStatus.PENDING_REVIEW,
         masked_account_id=mask_account_id(proposal.account_id),
         masked_customer_id=mask_customer_id(proposal.customer_id),
         transaction_id=proposal.transaction_id,
@@ -90,12 +92,19 @@ def to_dispute_proposal(proposal: DisputeProposal) -> DisputeProposalData:
         currency=proposal.currency,
         transaction_date=proposal.transaction_date,
         reason=proposal.reason,
+        reason_code=proposal.reason_code,
+        verified_evidence=list(proposal.verified_evidence),
+        missing_evidence=list(proposal.missing_evidence),
+        applied_policy=proposal.applied_policy,
+        proposed_action=proposal.proposed_action,
+        draft_hash=proposal.draft_hash,
+        review_path=f"/reviews/{proposal.request_id}",
         message=proposal.message,
     )
 
 
 def to_dispute_decision(decision: DisputeDecision) -> DisputeDecisionData:
-    """Present the outcome of a human approve or decline decision."""
+    """Present the outcome of a verified approve or decline decision."""
     return DisputeDecisionData(
         workflow_status=DisputeWorkflowStatus(decision.workflow_status),
         masked_account_id=mask_account_id(decision.account_id),
@@ -104,5 +113,22 @@ def to_dispute_decision(decision: DisputeDecision) -> DisputeDecisionData:
         case_id=decision.case_id,
         reason=decision.reason,
         decision_note=decision.decision_note,
+        approval_id=decision.approval_id,
         registered=decision.case_id is not None,
+    )
+
+
+def to_approval_record(record: DisputeApproval) -> ApprovalRecordData:
+    """Present a minted approval record to the human review application."""
+    return ApprovalRecordData(
+        approval_id=record.approval_id,
+        request_id=record.request_id,
+        draft_hash=record.draft_hash,
+        reviewer_id=record.reviewer_id,
+        decision=record.decision,
+        decision_note=record.decision_note,
+        created_at=record.created_at,
+        decided_at=record.decided_at,
+        expires_at=record.expires_at,
+        consumed_at=record.consumed_at,
     )

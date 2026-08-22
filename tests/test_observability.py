@@ -6,8 +6,16 @@ from src.app.container import build_container_from_engine
 from src.config.settings import Settings
 from src.contracts.requests import GetAccountSummaryRequest, SynthesizeInvestigationRequest
 from src.llm.gemini_client import GeminiSynthesisClient, _token_usage_from_response
-from src.observability.tracing import TokenUsage, ToolSpanEvent, TracingService, build_tracing_service
-from src.security.masking import mask_account_id
+from src.observability.tracing import (
+    TokenUsage,
+    ToolSpanEvent,
+    TracingService,
+    build_tracing_service,
+    sanitize_workflow_payload,
+    track_llm,
+    track_workflow,
+)
+from src.security.masking import mask_account_id, mask_customer_id
 from src.tools.get_account_summary_tool import get_account_summary
 from src.tools.synthesize_investigation_tool import synthesize_investigation
 from tests.conftest import SCENARIO_ACCOUNT, assert_ok
@@ -145,3 +153,59 @@ def test_gemini_client_attaches_usage_to_open_span():
     assert sink.events[0].usage == TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
     assert sink.events[0].model_name == "gemini-2.5-pro"
     assert sink.events[0].account_id_masked == mask_account_id(SCENARIO_ACCOUNT)
+    assert sink.events[0].llm_duration_ms is not None
+    assert sink.events[0].llm_duration_ms >= 0
+
+
+def test_wrap_langgraph_is_noop_when_tracing_disabled():
+    tracing = build_tracing_service(
+        app_settings=Settings(_env_file=None, opik_api_key="", opik_use_local=False),
+    )
+    sentinel = object()
+    assert tracing.wrap_langgraph(sentinel) is sentinel
+
+
+def test_opik_decorators_are_noop_when_tracing_disabled():
+    @track_llm("gemini_synthesize")
+    def synthesize(prompt: str) -> str:
+        return prompt
+
+    @track_workflow("dispute_workflow.propose")
+    def propose(request_id: str) -> str:
+        return request_id
+
+    assert synthesize("hello") == "hello"
+    assert propose("inv-1") == "inv-1"
+
+
+def test_sanitize_workflow_payload_redacts_narrative_and_masks_ids():
+    payload = {
+        "account_id": SCENARIO_ACCOUNT,
+        "customer_id": "CUST-0001",
+        "request_id": "inv-obs-hitl",
+        "transaction_id": "TXN-SCN-DUP-A",
+        "synthesis_summary": "The customer named a merchant.",
+        "investigation_findings": '{"descriptor":"HALCYON ELECTRONICS"}',
+        "merchant_display_name": "Halcyon Electronics",
+        "reason": "Unrecognized charge at Halcyon Electronics.",
+        "decision_note": "Customer confirmed",
+        "workflow_status": "PENDING_REVIEW",
+        "nested": {"synthesis_summary": "inner narrative"},
+    }
+
+    sanitized = sanitize_workflow_payload(payload)
+
+    assert sanitized["account_id"] == mask_account_id(SCENARIO_ACCOUNT)
+    assert sanitized["customer_id"] == mask_customer_id("CUST-0001")
+    assert sanitized["request_id"] == "inv-obs-hitl"
+    assert sanitized["transaction_id"] == "TXN-SCN-DUP-A"
+    assert sanitized["workflow_status"] == "PENDING_REVIEW"
+    assert sanitized["synthesis_summary"] == "[redacted]"
+    assert sanitized["investigation_findings"] == "[redacted]"
+    assert sanitized["merchant_display_name"] == "[redacted]"
+    assert sanitized["reason"] == "[redacted]"
+    assert sanitized["decision_note"] == "[redacted]"
+    assert sanitized["nested"]["synthesis_summary"] == "[redacted]"
+    assert SCENARIO_ACCOUNT not in str(sanitized)
+    assert "Halcyon" not in str(sanitized)
+    assert "Customer confirmed" not in str(sanitized)

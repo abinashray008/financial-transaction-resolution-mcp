@@ -14,7 +14,7 @@ Dependencies point inward. Nothing in `domain/` imports from `contracts/`, `repo
 | Layer | Directory | Responsibility | May depend on |
 | --- | --- | --- | --- |
 | Transport | `src/server.py` | Build the FastMCP app, set instructions, run stdio or Descope-authenticated HTTP. | Routers, container, config, `src/security/descope.py` |
-| Registration | `src/routers/` | Declare tools, prompts and resources. Translate MCP arguments into request contracts. | Handlers, contracts |
+| Registration | `src/routers/` | Declare tools, prompts, resources and the human review HTTP routes. Translate MCP arguments into request contracts. | Handlers, contracts |
 | Handlers | `src/tools/` | Validate identifiers, call a service or repository, present the result. | App, contracts, domain |
 | Workflows | `src/workflows/` | LangGraph HITL dispute registration (`interrupt` / `Command`). | Domain, repositories |
 | Application | `src/app/` | Cross-cutting execution, composition root, validators, presenters, data generation. | Contracts, domain, repositories, audit, security, workflows |
@@ -68,10 +68,12 @@ present". That has three consequences worth the indirection:
 `src/observability/tracing.py` exports investigation traces to [Opik](https://www.comet.com/docs/opik/)
 when `OPIK_API_KEY` is set (Opik Cloud) or `OPIK_USE_LOCAL=true` (self-hosted). Each MCP tool call
 becomes a span tagged with the investigation `request_id` as `thread_id`, so a full
-`investigate_transaction` loop is one thread in the Opik UI. Gemini calls go through
-`track_genai`, which records token usage and estimated cost. Span payloads are sanitized: tool name,
-request id, masked account id, outcome, duration and token counts — never descriptors, names or
-transaction bodies.
+`investigate_transaction` loop is one thread in the Opik UI. Gemini synthesis is decorated with
+`@track(type="llm")` and the client is wrapped with `track_genai`, which records token usage,
+estimated cost, and LLM call latency (`llm_duration_ms`). The LangGraph HITL dispute workflow is
+decorated with `@track` on propose/resume and wrapped with `track_langgraph`; node payloads are
+redacted before they leave the process. Span payloads are sanitized: tool name, request id, masked
+account id, outcome, duration and token counts — never descriptors, names or transaction bodies.
 
 ## Dependency injection
 
@@ -92,7 +94,8 @@ HTTP listener plus SQLite that is simple and safe; there is no ambient session t
 | `merchants` | Merchant catalog | `descriptor_patterns` is a JSON array of billing fragments |
 | `transactions` | Card transactions | `amount_minor` is integer cents |
 | `audit_events` | Sanitized tool invocations | Written on every tool call |
-| `dispute_cases` | Human-approved synthetic case files | Written only after LangGraph HITL approval |
+| `dispute_cases` | Human-approved synthetic case files | Written only after a verified one-time `approval_id` |
+| `approval_records` | Minted human decisions | Created by the review app with `reviewer_id`; consumed once by `submit_dispute_case` |
 
 The domain sees frozen dataclasses (`src/domain/models.py`), never ORM rows. `src/repositories/mappers.py`
 is the only translation point.
@@ -108,14 +111,18 @@ Both analysis services are pure: they take domain objects and return a verdict. 
 randomness, no model calls. Customer-facing narrative synthesis lives outside the domain, in
 `src/llm/` and the `synthesize_investigation` tool.
 
-**Human-in-the-loop dispute registration.** After synthesis, `propose_dispute_case` runs a LangGraph
+**Human-in-the-loop dispute registration.** After synthesis, `create_dispute_draft` runs a LangGraph
 graph (`src/workflows/dispute_case.py`) with an `InMemorySaver` checkpointer. The graph loads the
-account-scoped transaction, builds a proposed reason from stored facts plus the synthesis summary,
-then calls `interrupt()`. That pause is the human gate: no `dispute_cases` row exists yet.
-`submit_dispute_decision` resumes the same `request_id` thread with `Command(resume=…)`. Only
-`approved=true` inserts a row, and that row's `customer_id` is taken from the account — never from
-the caller. A decline ends the graph without a write. The customer's name never enters graph state
-or the MCP response.
+account-scoped transaction, builds a `PENDING_REVIEW` draft (reason code, verified/missing evidence,
+applied policy, proposed action, draft hash) from stored facts plus the investigation findings,
+then calls `interrupt()`. Creating the draft does not require approval and no `dispute_cases` row
+exists yet. A human reviewer records a decision at `GET/POST /reviews/{request_id}` using their
+authenticated identity. That path mints a one-time `approval_id` bound to `request_id` and
+`draft_hash`. `submit_dispute_case` accepts only `{request_id, approval_id}` — not `approved=true` —
+verifies the record (match, expiry, unused), consumes it, then resumes the same thread with
+`Command(resume=…)`. Only an `approved` decision inserts a row, and that row's `customer_id` is
+taken from the account — never from the caller. A declined record ends the graph without a write.
+The customer's name never enters graph state or the MCP response.
 
 **`MerchantResolverService`** normalizes a descriptor (upper-case, strip punctuation, drop leading
 aggregator prefixes such as `SQ *`, drop store numbers of three or more digits, drop noise tokens like
@@ -150,6 +157,16 @@ or above. The first three rules are what keep the service from crying wolf on th
 subscription scenarios.
 
 ## Security boundaries
+
+**Prompt injection is treated as untrusted data, not as instructions.** MCP prompt arguments are
+accepted only when they match identifier patterns; anything else is dropped rather than interpolated
+into the host prompt (`src/prompts/investigate_transaction_prompt.py`). Free-text tool fields reject
+ASCII control characters (`src/security/prompt_injection.py`, `src/app/validators.py`). Gemini
+synthesis fences caller findings behind a nonce delimiter, loads policy from this server's resources
+instead of a `policy` object the caller embedded, and rejects model output that tries to hijack the
+host agent (`src/llm/gemini_client.py`). The human approval gate on `submit_dispute_case` is
+still required even if a model or tool payload asks to skip it: the write path verifies a minted
+`approval_id`, and a boolean `approved` flag is not accepted.
 
 **Descope authenticates HTTP, not stdio.** `--transport http` constructs FastMCP's
 `DescopeProvider` (`src/security/descope.py`) from `DESCOPE_CONFIG_URL` and `BASE_URL`. Unauthenticated
@@ -188,6 +205,10 @@ truncated.
 | `DISPUTE_ALREADY_EXISTS` | Dispute workflow | A case is already registered for this charge |
 | `DISPUTE_WORKFLOW_NOT_FOUND` | Dispute workflow | No paused proposal for this `request_id` and account |
 | `DISPUTE_NOT_AWAITING_APPROVAL` | Dispute workflow | The graph is not waiting on a human decision |
+| `DISPUTE_APPROVAL_NOT_FOUND` | Approval service | No record matches this `approval_id` and `request_id` |
+| `DISPUTE_APPROVAL_EXPIRED` | Approval service | The minted token is past `expires_at` |
+| `DISPUTE_APPROVAL_ALREADY_CONSUMED` | Approval service | The one-time `approval_id` was already used |
+| `DISPUTE_APPROVAL_MISMATCH` | Approval service | The token's `draft_hash` does not match the paused draft |
 | `INTERNAL_ERROR` | `execute_tool` fallbacks | A generic message; detail goes to stderr |
 
 FastMCP is additionally configured with `mask_error_details=True`, so an exception escaping the
@@ -200,6 +221,7 @@ envelope still cannot carry internals to a client.
 | Unit | Masking, money conversion, descriptor normalization, duplicate rules the seed data cannot produce |
 | Handler | Every tool against a seeded temporary database, including all error codes |
 | Isolation | Cross-account access from both directions, plus indistinguishability of foreign and missing ids |
+| Prompt injection | Identifier interpolation, Gemini fencing, forged policy documents, control characters in free text |
 | Data | Determinism under a fixed seed, idempotent regeneration, no date drift |
 | Protocol | Tool, prompt and resource discovery, annotations, schemas, a full investigation, HITL dispute registration through a real `Client`, and Descope HTTP wiring without a live tenant |
 

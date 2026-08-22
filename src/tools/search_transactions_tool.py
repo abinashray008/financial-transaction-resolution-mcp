@@ -3,7 +3,7 @@
 from ..app.container import Container
 from ..app.execution import execute_tool
 from ..app.presenters import to_transaction_summary
-from ..app.validators import validate_account_id
+from ..app.validators import validate_account_id, validate_merchant_query
 from ..contracts.requests import SearchTransactionsRequest
 from ..contracts.responses import AppliedFilters, TransactionSearchData, TransactionSearchResponse
 from ..domain.criteria import TransactionSearchCriteria
@@ -22,7 +22,7 @@ def search_transactions(container: Container, request: SearchTransactionsRequest
             account_id=account_id,
             start_date=request.start_date,
             end_date=request.end_date,
-            merchant_query=request.merchant_query,
+            merchant_query=validate_merchant_query(request.merchant_query),
             minimum_amount=request.minimum_amount,
             maximum_amount=request.maximum_amount,
             status=request.status,

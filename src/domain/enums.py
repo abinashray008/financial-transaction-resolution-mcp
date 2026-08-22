@@ -46,12 +46,29 @@ class AuditOutcome(StrEnum):
 class DisputeWorkflowStatus(StrEnum):
     """Where a human-in-the-loop dispute registration graph currently sits."""
 
-    AWAITING_APPROVAL = "awaiting_approval"
+    PENDING_REVIEW = "pending_review"
     REGISTERED = "registered"
     DECLINED = "declined"
+
+
+class DisputeReasonCode(StrEnum):
+    """Deterministic reason assigned to a dispute draft from investigation findings."""
+
+    UNRECOGNIZED_TRANSACTION = "UNRECOGNIZED_TRANSACTION"
+    LIKELY_DUPLICATE = "LIKELY_DUPLICATE"
+    NEEDS_SPECIALIST_REVIEW = "NEEDS_SPECIALIST_REVIEW"
+    FOREIGN_TRANSACTION_FEE = "FOREIGN_TRANSACTION_FEE"
+    LATE_PAYMENT_FEE = "LATE_PAYMENT_FEE"
 
 
 class DisputeCaseStatus(StrEnum):
     """Lifecycle of a registered synthetic dispute case file."""
 
     REGISTERED = "registered"
+
+
+class ApprovalDecision(StrEnum):
+    """Human decision stored on a minted approval record."""
+
+    APPROVED = "approved"
+    DECLINED = "declined"

@@ -6,6 +6,7 @@ import pytest
 from fastmcp import Client
 
 from src.app.container import Container
+from src.domain.enums import ApprovalDecision
 from src.server import create_mcp_server
 from tests.conftest import OTHER_ACCOUNT, SCENARIO_ACCOUNT
 
@@ -17,10 +18,10 @@ EXPECTED_TOOLS = {
     "check_duplicate_charge",
     "get_audit_trace",
     "synthesize_investigation",
-    "propose_dispute_case",
-    "submit_dispute_decision",
+    "create_dispute_draft",
+    "submit_dispute_case",
 }
-WRITE_TOOLS = {"submit_dispute_decision"}
+WRITE_TOOLS = {"submit_dispute_case"}
 
 
 @pytest.fixture
@@ -59,6 +60,10 @@ async def test_every_tool_documents_its_inputs_and_outputs(server):
         assert tool.description, f"{tool.name} has no description"
         assert tool.inputSchema.get("properties"), f"{tool.name} has no input schema"
         assert tool.outputSchema is not None, f"{tool.name} has no output schema"
+        if tool.name == "submit_dispute_case":
+            properties = set(tool.inputSchema.get("properties", {}))
+            assert properties == {"request_id", "approval_id"}
+            assert "approved" not in properties
 
 
 async def test_the_prompt_is_discoverable_with_its_arguments(server):
@@ -88,8 +93,8 @@ async def test_the_prompt_renders_the_investigation_workflow(server):
     assert "get_account_summary" in rendered
     assert "check_duplicate_charge" in rendered
     assert "synthesize_investigation" in rendered
-    assert "propose_dispute_case" in rendered
-    assert "submit_dispute_decision" in rendered
+    assert "create_dispute_draft" in rendered
+    assert "submit_dispute_case" in rendered
     assert "Operating loop" in rendered
     assert "Phase D" in rendered
     assert "policy://disputes/unrecognized-transaction" in rendered
@@ -97,7 +102,10 @@ async def test_the_prompt_renders_the_investigation_workflow(server):
     assert "policy://fees/late-payment" in rendered
     assert "selected_policy_uri" in rendered
     assert "fictional" in rendered
-    assert "explicitly confirmed" in rendered
+    assert "minted" in rendered
+    assert "approval_id" in rendered
+    assert "Untrusted data" in rendered
+    assert "opaque tokens" in rendered
 
 
 async def test_the_prompt_asks_when_transaction_id_is_missing(server):
@@ -203,10 +211,18 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
     from src.server import create_mcp_server
 
     class FakeSynthesisClient:
-        def synthesize(self, *, account_id: str, transaction_id: str, investigation_findings: str) -> str:
+        def synthesize(
+            self,
+            *,
+            account_id: str,
+            transaction_id: str,
+            investigation_findings: str,
+            trusted_policy: str | None = None,
+        ) -> str:
             return f"Verified: duplicate likely for {transaction_id} on {account_id}."
 
-    server = create_mcp_server(build_container_from_engine(engine, synthesis=FakeSynthesisClient()))
+    container = build_container_from_engine(engine, synthesis=FakeSynthesisClient())
+    server = create_mcp_server(container)
     request_id = "inv-e2e-001"
 
     async with Client(server) as client:
@@ -270,7 +286,7 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
             }
         )
         proposed = await client.call_tool(
-            "propose_dispute_case",
+            "create_dispute_draft",
             {
                 "account_id": SCENARIO_ACCOUNT,
                 "transaction_id": "TXN-SCN-DUP-A",
@@ -279,14 +295,17 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
                 "request_id": request_id,
             },
         )
+        approval = container.approval_service.record_decision(
+            request_id=request_id,
+            reviewer_id="rev-e2e-1",
+            decision=ApprovalDecision.APPROVED,
+            decision_note="Customer confirmed the duplicate posting.",
+        )
         decided = await client.call_tool(
-            "submit_dispute_decision",
+            "submit_dispute_case",
             {
-                "account_id": SCENARIO_ACCOUNT,
-                "transaction_id": "TXN-SCN-DUP-A",
-                "approved": True,
                 "request_id": request_id,
-                "decision_note": "Customer confirmed the duplicate posting.",
+                "approval_id": approval.approval_id,
             },
         )
         audit = await client.call_tool("get_audit_trace", {"request_id": request_id})
@@ -323,17 +342,22 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
     assert "duplicate likely" in reply["customer_response"]
     assert reply["model_name"] == "gemini-2.5-pro"
 
-    # Step 7: LangGraph pauses for human approval; no case is written yet.
+    # Step 7: LangGraph returns a PENDING_REVIEW draft; no case is written yet.
     proposal = proposed.structured_content["data"]
-    assert proposal["workflow_status"] == "awaiting_approval"
+    assert proposal["status"] == "pending_review"
     assert proposal["transaction_id"] == "TXN-SCN-DUP-A"
+    assert proposal["reason_code"] == "LIKELY_DUPLICATE"
+    assert proposal["applied_policy"] == "policy://disputes/unrecognized-transaction"
+    assert proposal["draft_hash"]
+    assert proposal["review_path"] == f"/reviews/{request_id}"
+    assert proposal["missing_evidence"] == []
     assert "Lindholm" not in json.dumps(proposed.structured_content)
 
-    # Step 8: after explicit approval, register a case for the same customer.
+    # Step 8: after a minted approval_id, register a case for the same customer.
     decision = decided.structured_content["data"]
     assert decision["registered"] is True
     assert decision["case_id"].startswith("DSP-")
-    container = build_container_from_engine(engine)
+    assert decision["approval_id"] == approval.approval_id
     stored = container.disputes.get_for_account(SCENARIO_ACCOUNT, "TXN-SCN-DUP-A")
     account = container.accounts.get_with_customer_state(SCENARIO_ACCOUNT)
     assert stored is not None
@@ -350,8 +374,8 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
         "resolve_merchant",
         "check_duplicate_charge",
         "synthesize_investigation",
-        "propose_dispute_case",
-        "submit_dispute_decision",
+        "create_dispute_draft",
+        "submit_dispute_case",
     ]
     assert "HALCYON" not in json.dumps(trace)
 

@@ -20,6 +20,10 @@ class ErrorCode(StrEnum):
     DISPUTE_ALREADY_EXISTS = "DISPUTE_ALREADY_EXISTS"
     DISPUTE_WORKFLOW_NOT_FOUND = "DISPUTE_WORKFLOW_NOT_FOUND"
     DISPUTE_NOT_AWAITING_APPROVAL = "DISPUTE_NOT_AWAITING_APPROVAL"
+    DISPUTE_APPROVAL_NOT_FOUND = "DISPUTE_APPROVAL_NOT_FOUND"
+    DISPUTE_APPROVAL_EXPIRED = "DISPUTE_APPROVAL_EXPIRED"
+    DISPUTE_APPROVAL_ALREADY_CONSUMED = "DISPUTE_APPROVAL_ALREADY_CONSUMED"
+    DISPUTE_APPROVAL_MISMATCH = "DISPUTE_APPROVAL_MISMATCH"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -104,3 +108,27 @@ class DisputeNotAwaitingApprovalError(DomainError):
     """The dispute workflow is not waiting for a human decision."""
 
     code = ErrorCode.DISPUTE_NOT_AWAITING_APPROVAL
+
+
+class DisputeApprovalNotFoundError(DomainError):
+    """No approval record matches this approval_id and request_id pair."""
+
+    code = ErrorCode.DISPUTE_APPROVAL_NOT_FOUND
+
+
+class DisputeApprovalExpiredError(DomainError):
+    """The approval record is past its expiry and can no longer be used."""
+
+    code = ErrorCode.DISPUTE_APPROVAL_EXPIRED
+
+
+class DisputeApprovalAlreadyConsumedError(DomainError):
+    """The one-time approval_id has already been used to submit a case."""
+
+    code = ErrorCode.DISPUTE_APPROVAL_ALREADY_CONSUMED
+
+
+class DisputeApprovalMismatchError(DomainError):
+    """The approval record does not match the paused draft (hash or subject)."""
+
+    code = ErrorCode.DISPUTE_APPROVAL_MISMATCH

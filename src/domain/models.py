@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from .enums import AccountStatus, AccountType, DisputeCaseStatus, TransactionStatus
+from .enums import (
+    AccountStatus,
+    AccountType,
+    ApprovalDecision,
+    DisputeCaseStatus,
+    DisputeReasonCode,
+    TransactionStatus,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +117,7 @@ class DisputeCase:
 
 @dataclass(frozen=True, slots=True)
 class DisputeProposal:
-    """A proposed case waiting on an explicit human approval."""
+    """A PENDING_REVIEW draft. Creating it does not register a case."""
 
     request_id: str
     account_id: str
@@ -121,12 +128,18 @@ class DisputeProposal:
     currency: str
     transaction_date: date
     reason: str
+    reason_code: DisputeReasonCode
+    verified_evidence: tuple[str, ...]
+    missing_evidence: tuple[str, ...]
+    applied_policy: str
+    proposed_action: str
+    draft_hash: str
     message: str
 
 
 @dataclass(frozen=True, slots=True)
 class DisputeDecision:
-    """Result of resuming the dispute workflow after a human decision."""
+    """Result of resuming the dispute workflow after a verified approval."""
 
     request_id: str
     account_id: str
@@ -136,3 +149,25 @@ class DisputeDecision:
     case_id: str | None
     reason: str
     decision_note: str | None
+    approval_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DisputeApproval:
+    """One-time human approval record. Minted by the review app, not the LLM."""
+
+    approval_id: str
+    request_id: str
+    draft_hash: str
+    reviewer_id: str
+    decision: ApprovalDecision
+    decision_note: str | None
+    created_at: datetime
+    decided_at: datetime
+    expires_at: datetime
+    consumed_at: datetime | None
+
+    @property
+    def is_approved(self) -> bool:
+        """Whether the reviewer approved registration."""
+        return self.decision is ApprovalDecision.APPROVED

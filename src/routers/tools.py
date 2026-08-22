@@ -15,20 +15,20 @@ from pydantic import Field
 from ..app.container import Container
 from ..contracts.requests import (
     CheckDuplicateChargeRequest,
+    CreateDisputeDraftRequest,
     GetAccountSummaryRequest,
     GetAuditTraceRequest,
     GetTransactionDetailsRequest,
-    ProposeDisputeCaseRequest,
     ResolveMerchantRequest,
     SearchTransactionsRequest,
-    SubmitDisputeDecisionRequest,
+    SubmitDisputeCaseRequest,
     SynthesizeInvestigationRequest,
 )
 from ..contracts.responses import (
     AccountSummaryResponse,
     AuditTraceResponse,
     DisputeDecisionResponse,
-    DisputeProposalResponse,
+    DisputeDraftResponse,
     DuplicateCheckResponse,
     MerchantResolutionResponse,
     SynthesisResponse,
@@ -43,15 +43,13 @@ from ..domain.criteria import (
 )
 from ..domain.enums import TransactionStatus
 from ..tools.check_duplicate_charge_tool import check_duplicate_charge as check_duplicate_charge_handler
+from ..tools.create_dispute_draft_tool import create_dispute_draft as create_dispute_draft_handler
 from ..tools.get_account_summary_tool import get_account_summary as get_account_summary_handler
 from ..tools.get_audit_trace_tool import get_audit_trace as get_audit_trace_handler
 from ..tools.get_transaction_details_tool import get_transaction_details as get_transaction_details_handler
-from ..tools.propose_dispute_case_tool import propose_dispute_case as propose_dispute_case_handler
 from ..tools.resolve_merchant_tool import resolve_merchant as resolve_merchant_handler
 from ..tools.search_transactions_tool import search_transactions as search_transactions_handler
-from ..tools.submit_dispute_decision_tool import (
-    submit_dispute_decision as submit_dispute_decision_handler,
-)
+from ..tools.submit_dispute_case_tool import submit_dispute_case as submit_dispute_case_handler
 from ..tools.synthesize_investigation_tool import (
     synthesize_investigation as synthesize_investigation_handler,
 )
@@ -238,7 +236,7 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
         )
 
     @mcp.tool(annotations=DISPUTE_PROPOSE)
-    def propose_dispute_case(
+    def create_dispute_draft(
         account_id: AccountId,
         transaction_id: TransactionId,
         investigation_findings: Annotated[
@@ -246,25 +244,26 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
             Field(
                 description=(
                     "JSON object collecting the earlier tool envelopes. Required so a dispute "
-                    "cannot be proposed without an investigation."
+                    "draft cannot be created without an investigation."
                 ),
             ),
         ],
         synthesis_summary: Annotated[
             str,
             Field(
-                description=("Customer-facing reply from synthesize_investigation that the proposal is based on."),
+                description=("Customer-facing reply from synthesize_investigation that the draft is based on."),
             ),
         ],
         request_id: RequestId = None,
-    ) -> DisputeProposalResponse:
-        """Start the LangGraph dispute workflow and pause for human approval. Does not write a
-        dispute case. Call this only after synthesize_investigation. Present the proposed case
-        to the end user; if they approve, call submit_dispute_decision with the same request_id.
+    ) -> DisputeDraftResponse:
+        """Create a PENDING_REVIEW dispute draft with identifiers, reason code, verified and
+        missing evidence, applied policy, proposed action, and a draft hash. Does not require
+        approval and does not write a dispute case. Call this only after synthesize_investigation.
+        Present the draft and its review_path so a human can record a decision and mint approval_id.
         """
-        return propose_dispute_case_handler(
+        return create_dispute_draft_handler(
             container,
-            ProposeDisputeCaseRequest(
+            CreateDisputeDraftRequest(
                 account_id=account_id,
                 transaction_id=transaction_id,
                 investigation_findings=investigation_findings,
@@ -274,33 +273,27 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
         )
 
     @mcp.tool(annotations=DISPUTE_WRITE)
-    def submit_dispute_decision(
-        account_id: AccountId,
-        transaction_id: TransactionId,
-        approved: Annotated[
-            bool,
-            Field(description="True to register the case, false to decline without writing a row."),
-        ],
+    def submit_dispute_case(
         request_id: Annotated[
             str,
-            Field(description="The same correlation id used for propose_dispute_case and the investigation."),
+            Field(description="The same correlation id used for create_dispute_draft and the investigation."),
         ],
-        decision_note: Annotated[
-            str | None,
-            Field(description="Optional human note recorded with the decision."),
-        ] = None,
-    ) -> DisputeDecisionResponse:
-        """Resume the paused LangGraph workflow with the end user's decision. A dispute_cases row
-        is written only when approved is true, and only for the same customer as the account.
-        Declining leaves the database unchanged. This is a synthetic case file, not an issuer ruling.
-        """
-        return submit_dispute_decision_handler(
-            container,
-            SubmitDisputeDecisionRequest(
-                account_id=account_id,
-                transaction_id=transaction_id,
-                approved=approved,
-                decision_note=decision_note,
-                request_id=request_id,
+        approval_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "One-time id minted by the human review application after an authenticated "
+                    "reviewer decision. approved=true is not accepted."
+                ),
             ),
+        ],
+    ) -> DisputeDecisionResponse:
+        """Create a synthetic dispute case after a verified one-time approval_id. The MCP
+        server checks the approval record (request_id, draft hash, expiry, unused) before
+        writing. A boolean approved flag is not sufficient proof. Declining leaves
+        dispute_cases unchanged. This is a synthetic case file, not an issuer ruling.
+        """
+        return submit_dispute_case_handler(
+            container,
+            SubmitDisputeCaseRequest(request_id=request_id, approval_id=approval_id),
         )

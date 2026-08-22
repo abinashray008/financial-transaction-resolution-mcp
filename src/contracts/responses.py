@@ -9,7 +9,15 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..domain.enums import AccountStatus, AccountType, Confidence, DisputeWorkflowStatus, TransactionStatus
+from ..domain.enums import (
+    AccountStatus,
+    AccountType,
+    ApprovalDecision,
+    Confidence,
+    DisputeReasonCode,
+    DisputeWorkflowStatus,
+    TransactionStatus,
+)
 from .common import Money, ToolResponseBase
 
 
@@ -182,10 +190,10 @@ class SynthesisResponse(ToolResponseBase):
     data: SynthesisData | None = None
 
 
-class DisputeProposalData(_Payload):
-    """Result of ``propose_dispute_case``. The case is not yet written."""
+class DisputeDraftData(_Payload):
+    """Result of ``create_dispute_draft``. The case is not yet written and no approval is required."""
 
-    workflow_status: DisputeWorkflowStatus
+    status: DisputeWorkflowStatus = Field(description="Always pending_review until submit_dispute_case runs.")
     masked_account_id: str
     masked_customer_id: str = Field(description="Masked customer identifier. The customer's name is never returned.")
     transaction_id: str
@@ -194,17 +202,24 @@ class DisputeProposalData(_Payload):
     currency: str
     transaction_date: date
     reason: str
-    message: str = Field(description="What the human is being asked to approve.")
+    reason_code: DisputeReasonCode
+    verified_evidence: list[str]
+    missing_evidence: list[str]
+    applied_policy: str = Field(description="Server-owned policy URI applied to this draft.")
+    proposed_action: str
+    draft_hash: str = Field(description="SHA-256 of the canonical draft payload.")
+    review_path: str = Field(description="HTTP path where a human reviewer records a decision and mints approval_id.")
+    message: str = Field(description="What the human is being asked to approve on the next step.")
 
 
-class DisputeProposalResponse(ToolResponseBase):
-    """Envelope for ``propose_dispute_case``."""
+class DisputeDraftResponse(ToolResponseBase):
+    """Envelope for ``create_dispute_draft``."""
 
-    data: DisputeProposalData | None = None
+    data: DisputeDraftData | None = None
 
 
 class DisputeDecisionData(_Payload):
-    """Result of ``submit_dispute_decision``."""
+    """Result of ``submit_dispute_case``."""
 
     workflow_status: DisputeWorkflowStatus
     masked_account_id: str
@@ -213,10 +228,26 @@ class DisputeDecisionData(_Payload):
     case_id: str | None = Field(description="Present only when the human approved and the case was registered.")
     reason: str
     decision_note: str | None
+    approval_id: str = Field(description="The one-time approval record that authorized this submission.")
     registered: bool = Field(description="True only when a dispute_cases row was written.")
 
 
+class ApprovalRecordData(_Payload):
+    """A minted approval record returned to the human review application."""
+
+    approval_id: str
+    request_id: str
+    draft_hash: str
+    reviewer_id: str
+    decision: ApprovalDecision
+    decision_note: str | None
+    created_at: datetime
+    decided_at: datetime
+    expires_at: datetime
+    consumed_at: datetime | None
+
+
 class DisputeDecisionResponse(ToolResponseBase):
-    """Envelope for ``submit_dispute_decision``."""
+    """Envelope for ``submit_dispute_case``."""
 
     data: DisputeDecisionData | None = None

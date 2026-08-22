@@ -88,29 +88,30 @@ class SynthesizeInvestigationRequest(_Request):
     )
 
 
-class ProposeDisputeCaseRequest(_Request):
-    """Input for ``propose_dispute_case``."""
+class CreateDisputeDraftRequest(_Request):
+    """Input for ``create_dispute_draft``."""
 
     account_id: str
     transaction_id: str
     investigation_findings: str = Field(
         description=(
             "JSON object collecting the earlier tool envelopes. Required so a dispute "
-            "cannot be proposed without an investigation."
+            "draft cannot be created without an investigation."
         ),
     )
     synthesis_summary: str = Field(
-        description="Customer-facing reply from synthesize_investigation that the proposal is based on.",
+        description="Customer-facing reply from synthesize_investigation that the draft is based on.",
     )
 
 
-class SubmitDisputeDecisionRequest(_Request):
-    """Input for ``submit_dispute_decision``."""
+class SubmitDisputeCaseRequest(BaseModel):
+    """Input for ``submit_dispute_case``. A minted ``approval_id`` is required."""
 
-    account_id: str
-    transaction_id: str
-    approved: bool = Field(description="True to register the case, false to decline without writing.")
-    decision_note: str | None = Field(
-        default=None,
-        description="Optional human note recorded with the decision.",
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    request_id: str = Field(
+        description="The same correlation id used for create_dispute_draft and the investigation.",
+    )
+    approval_id: str = Field(
+        description="One-time id minted by the human review application after an authenticated decision.",
     )

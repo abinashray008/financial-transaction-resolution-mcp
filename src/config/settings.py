@@ -46,7 +46,7 @@ class Settings(BaseSettings):
         description="API key for Gemini synthesis. Required only for synthesize_investigation.",
     )
     gemini_model: str = Field(
-        default="gemini-2.5-pro",
+        default="gemini-2.5-flash",
         alias="GEMINI_MODEL",
         description="Gemini model id used to synthesize a customer-facing investigation reply.",
     )
@@ -99,6 +99,13 @@ class Settings(BaseSettings):
         default=8000,
         alias="HTTP_PORT",
         description="Bind port for HTTP transport.",
+    )
+    approval_ttl_seconds: int = Field(
+        default=900,
+        alias="APPROVAL_TTL_SECONDS",
+        description="How long a minted dispute approval_id remains usable.",
+        ge=60,
+        le=86_400,
     )
 
     @property

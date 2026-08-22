@@ -50,9 +50,10 @@ does not file, approve or resolve a dispute with a card network.
   `get_audit_trace` (tool names and outcomes only; no PII).
 - **Customer-facing summary.** After evidence is gathered, synthesize a reply with Gemini that
   follows the selected policy and never claims an issuer filed a dispute.
-- **Human-approved dispute case.** After synthesis, `propose_dispute_case` pauses a LangGraph
-  workflow. If the end user confirms, `submit_dispute_decision` writes a `dispute_cases` row for
-  that customer.
+- **Human-approved dispute case.** After synthesis, `create_dispute_draft` returns a
+  `PENDING_REVIEW` proposal (no approval required). A human reviewer records a decision in the
+  review application, which mints a one-time `approval_id`. `submit_dispute_case` writes a
+  `dispute_cases` row only after that id is verified.
 
 ## Demo
 
@@ -135,9 +136,10 @@ policy resource (`policy://disputes/unrecognized-transaction`, `policy://fees/fo
 or `policy://fees/late-payment`), calls the evidence tools, and finishes with
 `synthesize_investigation`. Evidence analysis never calls a model. Gemini is used only to draft the
 final customer-facing narrative from the gathered envelopes and the selected policy. If the end user
-then wants a dispute case, `propose_dispute_case` starts a LangGraph graph that interrupts for
-approval; `submit_dispute_decision` resumes it and writes `dispute_cases` only when `approved` is
-true.
+then wants a dispute case, `create_dispute_draft` starts a LangGraph graph and returns a
+`PENDING_REVIEW` proposal without writing a case. A human reviewer mints a one-time `approval_id`
+at `/reviews/{request_id}`; `submit_dispute_case` accepts only `request_id` and `approval_id` and
+writes `dispute_cases` only when that record is an unused, unexpired approval.
 
 The only external API is Google Gemini (`google-genai`, default model `gemini-2.5-pro`), and only
 the synthesis tool needs `GEMINI_API_KEY`. Search, merchant resolution, duplicate detection and
@@ -174,17 +176,18 @@ configuration.
 
 - `src/server.py` — FastMCP instance, instructions, stdio and Descope-authenticated HTTP.
 - `src/routers/tools.py` — Nine tools. Evidence tools and synthesis use `readOnlyHint`;
-  `submit_dispute_decision` is the only write.
+  `submit_dispute_case` is the only write and requires a minted `approval_id`.
 - `src/routers/prompts.py` — `investigate_transaction`.
 - `src/routers/resources.py` — `status://server` and three policy URIs.
+- `src/routers/reviews.py` — Human review application: display a draft and mint `approval_id`.
 
 #### MCP capabilities
 
 - `src/tools/` — One handler per tool (`get_account_summary`, `search_transactions`,
   `get_transaction_details`, `resolve_merchant`, `check_duplicate_charge`, `get_audit_trace`,
-  `synthesize_investigation`, `propose_dispute_case`, `submit_dispute_decision`).
-- `src/workflows/dispute_case.py` — LangGraph graph: load context, build proposal, interrupt for
-  human approval, persist only on approve.
+  `synthesize_investigation`, `create_dispute_draft`, `submit_dispute_case`).
+- `src/workflows/dispute_case.py` — LangGraph graph: load context, build a PENDING_REVIEW draft,
+  interrupt, persist only after a verified approval record.
 - `src/prompts/investigate_transaction_prompt.py` — Agentic workflow text, including the ask-the-caller
   gate and the post-synthesis human-approval phase.
 - `src/resources/` — Server status plus unrecognized-transaction, foreign-transaction-fee and
@@ -204,7 +207,7 @@ configuration.
 - `src/security/masking.py` — Account and card masking.
 - `src/security/descope.py` — Descope well-known URL parsing and `DescopeProvider` construction.
 - `src/audit/service.py` — Append-only sanitized audit events.
-- `src/observability/tracing.py` — Optional Opik traces, Gemini token usage, investigation threads.
+- `src/observability/tracing.py` — Optional Opik traces, Gemini token usage and latency, HITL graph.
 - `src/llm/gemini_client.py` — The only module that calls a model.
 - `src/config/settings.py` — Environment-backed settings.
 
@@ -274,8 +277,8 @@ Course-required capabilities implemented in this server, with a brief descriptio
 | `check_duplicate_charge` | Rule-based duplicate check with `LOW` / `MEDIUM` / `HIGH` confidence. | `account_id`, `transaction_id` |
 | `get_audit_trace` | Sanitized audit events for a correlation id. | `request_id` |
 | `synthesize_investigation` | Gemini drafts a customer-facing reply from gathered envelopes. Requires `GEMINI_API_KEY`. | `account_id`, `transaction_id`, `investigation_findings` |
-| `propose_dispute_case` | Starts the LangGraph HITL workflow and pauses for approval. Does not write a case. | `account_id`, `transaction_id`, `investigation_findings`, `synthesis_summary` |
-| `submit_dispute_decision` | Resumes the graph. Writes `dispute_cases` only when `approved` is true. | `account_id`, `transaction_id`, `approved`, `request_id` |
+| `create_dispute_draft` | Builds a `PENDING_REVIEW` proposal (reason code, evidence, policy, proposed action, draft hash). Does not require approval and does not write a case. | `account_id`, `transaction_id`, `investigation_findings`, `synthesis_summary` |
+| `submit_dispute_case` | Creates a synthetic dispute case after verifying a minted `approval_id`. `approved=true` is not accepted. | `request_id`, `approval_id` |
 
 ## Custom Features
 
@@ -294,9 +297,10 @@ Features implemented beyond the course minimum, with a brief description of each
 | **Integer minor units in storage** | Amounts are stored as integer cents so duplicate equality is exact; JSON still serializes amounts as decimal strings. |
 | **Escaped `LIKE` wildcards** | A `%` or `_` in `merchant_query` cannot widen the SQL search. |
 | **Cross-account isolation** | Every transaction query includes `account_id` in `WHERE`. A charge on another account returns the same `TRANSACTION_NOT_FOUND` as a missing id. |
-| **Opik agent observability** | Optional [Opik](https://www.comet.com/docs/opik/) tracing (`src/observability/tracing.py`). MCP tool calls become spans grouped by `request_id`; Gemini calls record token usage and estimated cost. Payloads are sanitized (no names, descriptors or transaction bodies). |
-| **LangGraph human-in-the-loop disputes** | After synthesis, `propose_dispute_case` interrupts a LangGraph graph. `submit_dispute_decision` resumes it. An approved decision inserts a `dispute_cases` row for the same `customer_id` as the account; a decline writes nothing. |
+| **Opik agent observability** | Optional [Opik](https://www.comet.com/docs/opik/) tracing (`src/observability/tracing.py`). MCP tool calls become spans grouped by `request_id`; Gemini synthesis is `@track`'d for token usage and LLM call latency; the HITL LangGraph workflow is wrapped with `track_langgraph`. Payloads are sanitized (no names, descriptors or transaction bodies). |
+| **LangGraph human-in-the-loop disputes** | After synthesis, `create_dispute_draft` interrupts a LangGraph graph with a `PENDING_REVIEW` proposal. A human reviewer records a decision at `/reviews/{request_id}` (authenticated `reviewer_id`) and receives a one-time `approval_id`. `submit_dispute_case` verifies that id before writing. An approved record inserts a `dispute_cases` row for the same `customer_id` as the account; a decline writes nothing. |
 | **Descope HTTP authentication** | `--transport http` uses FastMCP's `DescopeProvider`. MCP clients register via Dynamic Client Registration and send a Descope JWT. Stdio stays local-trust and does not speak OAuth. |
+| **Prompt-injection hardening** | Prompt arguments are interpolated only when they match identifier patterns. Gemini fences untrusted findings, uses a server-loaded policy, and rejects host-agent hijack output. Free-text fields reject control characters. |
 
 ## Setup Instructions
 
@@ -428,6 +432,9 @@ DESCOPE_CONFIG_URL=
 BASE_URL=http://127.0.0.1:8000
 HTTP_HOST=127.0.0.1
 HTTP_PORT=8000
+
+# How long a minted dispute approval_id remains usable
+APPROVAL_TTL_SECONDS=900
 ```
 
 | Variable | Required to run? | Default | What it does | How to obtain |
@@ -448,6 +455,7 @@ HTTP_PORT=8000
 | `BASE_URL` | HTTP only | `http://127.0.0.1:8000` | Public URL advertised in OAuth protected-resource metadata | Match the URL clients use to reach this server |
 | `HTTP_HOST` | HTTP only | `127.0.0.1` | Bind address for `--transport http` | Use `0.0.0.0` only if you intend to listen beyond loopback |
 | `HTTP_PORT` | HTTP only | `8000` | Bind port for `--transport http` | Choose freely |
+| `APPROVAL_TTL_SECONDS` | No | `900` | Lifetime of a minted dispute `approval_id` | 60–86400 seconds |
 
 **Important:**
 
@@ -467,10 +475,12 @@ inspect LLM calls, token usage, estimated cost, and the sequence of MCP tools fo
 3. Restart the MCP server, run an investigation, then open the Opik UI. Filter by project
    `financial-transaction-resolution` and thread id = the investigation `request_id`.
 
-Gemini synthesis is wrapped with `track_genai`, which logs the model call and token/cost metrics.
-Each MCP tool is a span. Payloads are sanitized: no customer names, statement descriptors or
-transaction bodies. Tracing is off when neither `OPIK_API_KEY` nor `OPIK_USE_LOCAL` is set, so
-offline evidence tools stay local.
+Gemini synthesis is decorated with `@track(type="llm")` and wrapped with `track_genai`, which logs
+the model call, token counts, estimated cost, and LLM response time. The HITL dispute graph is
+wrapped with `track_langgraph` so propose and human-resume steps appear on the same
+`request_id` thread. Each MCP tool is a span. Payloads are sanitized: no customer names, statement
+descriptors or transaction bodies. Tracing is off when neither `OPIK_API_KEY` nor `OPIK_USE_LOCAL`
+is set, so offline evidence tools stay local.
 
 ## Running the Server
 
@@ -532,9 +542,10 @@ Expected highlights for the duplicate scenario:
 3. `resolve_merchant` → Halcyon Electronics, `HIGH` confidence, `prefix_match`.
 4. `check_duplicate_charge` → `duplicate_likely: true`, `HIGH`, candidate `TXN-SCN-DUP-B`.
 5. `get_audit_trace` → tool names, timestamps, masked account, outcome, duration. No arguments or names.
-6. After synthesis, `propose_dispute_case` → `awaiting_approval` (no `dispute_cases` row yet).
-7. If the user confirms, `submit_dispute_decision(approved=true)` → `DSP-…` registered for the same
-   customer as `ACCT-0001`. A decline writes nothing.
+6. After synthesis, `create_dispute_draft` → `pending_review` (no `dispute_cases` row yet).
+7. If a human reviewer records an approval at `/reviews/{request_id}`, `submit_dispute_case` with
+   that `approval_id` → `DSP-…` registered for the same customer as `ACCT-0001`. A declined
+   approval record writes nothing. `approved=true` is not accepted.
 
 The hotel pair (`TXN-SCN-HOLD-01` / `TXN-SCN-HOLD-02`) returns **LOW** confidence: an authorization
 hold paired with a posted charge is normal settlement, not a duplicate. Monthly subscriptions are

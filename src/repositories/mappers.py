@@ -1,9 +1,9 @@
 """Row-to-domain mapping."""
 
-from ..domain.enums import AccountStatus, AccountType, DisputeCaseStatus, TransactionStatus
-from ..domain.models import Account, Customer, DisputeCase, Merchant, Transaction
+from ..domain.enums import AccountStatus, AccountType, ApprovalDecision, DisputeCaseStatus, TransactionStatus
+from ..domain.models import Account, Customer, DisputeApproval, DisputeCase, Merchant, Transaction
 from ..domain.money import from_minor_units
-from .models import AccountRow, CustomerRow, DisputeCaseRow, MerchantRow, TransactionRow
+from .models import AccountRow, ApprovalRecordRow, CustomerRow, DisputeCaseRow, MerchantRow, TransactionRow
 
 
 def to_customer(row: CustomerRow) -> Customer:
@@ -65,4 +65,19 @@ def to_dispute_case(row: DisputeCaseRow) -> DisputeCase:
         currency=row.currency,
         merchant_display_name=row.merchant_display_name,
         created_at=row.created_at,
+    )
+
+
+def to_dispute_approval(row: ApprovalRecordRow) -> DisputeApproval:
+    return DisputeApproval(
+        approval_id=row.approval_id,
+        request_id=row.request_id,
+        draft_hash=row.draft_hash,
+        reviewer_id=row.reviewer_id,
+        decision=ApprovalDecision(row.decision),
+        decision_note=row.decision_note,
+        created_at=row.created_at,
+        decided_at=row.decided_at,
+        expires_at=row.expires_at,
+        consumed_at=row.consumed_at,
     )
