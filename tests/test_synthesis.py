@@ -5,6 +5,7 @@ import json
 import pytest
 
 from src.app.container import Container, build_container_from_engine
+from src.config.settings import settings
 from src.contracts.requests import SynthesizeInvestigationRequest
 from src.domain.exceptions import ErrorCode
 from src.tools.synthesize_investigation_tool import synthesize_investigation
@@ -71,7 +72,7 @@ def test_synthesize_investigation_uses_injected_client(synthesis_container):
     assert_ok(response)
     assert response.data is not None
     assert "likely duplicate" in response.data.customer_response
-    assert response.data.model_name == "gemini-2.5-pro"
+    assert response.data.model_name == settings.gemini_model
     assert len(fake.calls) == 1
     assert fake.calls[0]["account_id"] == SCENARIO_ACCOUNT
     assert fake.calls[0]["transaction_id"] == "TXN-SCN-DUP-A"

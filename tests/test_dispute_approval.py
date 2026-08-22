@@ -20,6 +20,7 @@ from src.domain.exceptions import (
     DisputeWorkflowNotFoundError,
     ErrorCode,
 )
+from src.security.reviewer import ReviewAuth
 from src.server import create_mcp_server
 from tests.conftest import SCENARIO_ACCOUNT, assert_error
 from tests.test_dispute_workflow import _draft, _mint, _submit
@@ -134,7 +135,7 @@ def test_consume_is_one_time(container):
 def test_http_review_mints_approval_id_from_reviewer_identity(container):
     request_id = "inv-apr-http"
     assert _draft(container, request_id=request_id).status == "ok"
-    server = create_mcp_server(container)
+    server = create_mcp_server(container, review_auth=ReviewAuth.local_demo())
 
     with TestClient(server.http_app()) as client:
         shown = client.get(f"/reviews/{request_id}", headers={"accept": "application/json"})
@@ -162,7 +163,7 @@ def test_http_review_mints_approval_id_from_reviewer_identity(container):
 def test_http_review_requires_reviewer_identity(container):
     request_id = "inv-apr-norev"
     assert _draft(container, request_id=request_id).status == "ok"
-    server = create_mcp_server(container)
+    server = create_mcp_server(container, review_auth=ReviewAuth.local_demo())
 
     with TestClient(server.http_app()) as client:
         response = client.post(
@@ -188,19 +189,26 @@ def test_http_review_with_descope_requires_bearer(container):
         ),
         base_url="http://127.0.0.1:8000",
     )
-    server = create_mcp_server(container, auth=build_descope_provider(settings))
+    provider = build_descope_provider(settings)
+    server = create_mcp_server(
+        container,
+        auth=provider,
+        review_auth=ReviewAuth(mode="jwt", verifier=provider),
+    )
 
     with TestClient(server.http_app()) as client:
+        shown = client.get(f"/reviews/{request_id}", headers={"accept": "application/json"})
         response = client.post(
             f"/reviews/{request_id}/decision",
             headers={"x-reviewer-id": "rev-http-1", "accept": "application/json"},
             json={"decision": "approved"},
         )
 
+    assert shown.status_code == 401
     assert response.status_code == 401
 
 
-def test_http_review_html_form_mints_without_bearer_when_descope_enabled(container):
+def test_http_review_html_form_is_rejected_when_jwt_mode(container):
     from src.config.settings import Settings
     from src.security.descope import build_descope_provider
 
@@ -213,7 +221,33 @@ def test_http_review_html_form_mints_without_bearer_when_descope_enabled(contain
         ),
         base_url="http://127.0.0.1:8000",
     )
-    server = create_mcp_server(container, auth=build_descope_provider(settings))
+    provider = build_descope_provider(settings)
+    server = create_mcp_server(
+        container,
+        auth=provider,
+        review_auth=ReviewAuth(mode="jwt", verifier=provider),
+    )
+
+    with TestClient(server.http_app()) as client:
+        shown = client.get(f"/reviews/{request_id}", headers={"accept": "text/html"})
+        minted = client.post(
+            f"/reviews/{request_id}/decision",
+            data={
+                "decision": "approved",
+                "decision_note": "Reviewed in the browser form",
+                "reviewer_id": "rev-form-1",
+            },
+        )
+
+    assert shown.status_code == 401
+    assert minted.status_code == 401
+    assert "bearer token" in minted.text.lower()
+
+
+def test_http_review_html_form_mints_only_in_local_demo(container):
+    request_id = "inv-html-local"
+    assert _draft(container, request_id=request_id).status == "ok"
+    server = create_mcp_server(container, review_auth=ReviewAuth.local_demo())
 
     with TestClient(server.http_app()) as client:
         shown = client.get(f"/reviews/{request_id}", headers={"accept": "text/html"})
@@ -228,6 +262,7 @@ def test_http_review_html_form_mints_without_bearer_when_descope_enabled(contain
 
     assert shown.status_code == 200
     assert "Reviewer id" in shown.text
+    assert "Local demo mode" in shown.text
     assert minted.status_code == 201
     match = re.search(r"apr-[A-Za-z0-9]+", minted.text)
     assert match is not None
@@ -237,10 +272,10 @@ def test_http_review_html_form_mints_without_bearer_when_descope_enabled(contain
     assert stored.decision == ApprovalDecision.APPROVED
 
 
-def test_http_review_reads_reviewer_from_jwt_sub(container):
+def test_http_review_unsigned_jwt_is_rejected(container):
     request_id = "inv-apr-jwt"
     assert _draft(container, request_id=request_id).status == "ok"
-    server = create_mcp_server(container)
+    server = create_mcp_server(container, review_auth=ReviewAuth(mode="jwt"))
     header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
     payload = base64.urlsafe_b64encode(json.dumps({"sub": "rev-jwt-1"}).encode()).rstrip(b"=").decode()
     token = f"{header}.{payload}.x"
@@ -252,9 +287,8 @@ def test_http_review_reads_reviewer_from_jwt_sub(container):
             json={"decision": "declined", "decision_note": "No case"},
         )
 
-    assert minted.status_code == 201
-    assert minted.json()["reviewer_id"] == "rev-jwt-1"
-    assert minted.json()["decision"] == "declined"
+    assert minted.status_code == 401
+    assert minted.json()["error"]["code"] == "UNAUTHORIZED"
 
 
 def test_submit_contract_rejects_approved_boolean():
@@ -273,7 +307,7 @@ def test_forged_approval_id_does_not_register(container):
 
 
 def test_http_review_missing_draft_is_not_found(container):
-    server = create_mcp_server(container)
+    server = create_mcp_server(container, review_auth=ReviewAuth.local_demo())
 
     with TestClient(server.http_app()) as client:
         response = client.get("/reviews/inv-apr-absent", headers={"accept": "application/json"})

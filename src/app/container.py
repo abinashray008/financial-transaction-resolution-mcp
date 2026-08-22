@@ -7,6 +7,7 @@ starting an MCP client.
 
 from dataclasses import dataclass
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from sqlalchemy import Engine, inspect
 
 from ..audit.service import AuditService
@@ -23,6 +24,7 @@ from ..repositories.merchants import MerchantRepository
 from ..repositories.models import Base
 from ..repositories.session import SessionFactory, build_engine, build_session_factory
 from ..repositories.transactions import TransactionRepository
+from ..workflows.checkpointer import build_sqlite_checkpointer, checkpoint_path_for_engine
 from ..workflows.dispute_case import DisputeWorkflowRunner
 from .approvals import ApprovalService
 
@@ -58,6 +60,8 @@ def build_container_from_engine(
     *,
     synthesis: SynthesisClient | None = None,
     tracing: TracingService | None = None,
+    checkpointer: BaseCheckpointSaver[str] | None = None,
+    checkpoint_path: str | None = None,
 ) -> Container:
     """Assemble a container around an existing engine."""
     session_factory = build_session_factory(engine)
@@ -73,10 +77,14 @@ def build_container_from_engine(
     disputes = DisputeRepository(session_factory)
     approvals = ApprovalRepository(session_factory)
     tracing_service = tracing or build_tracing_service()
+    saver = checkpointer or build_sqlite_checkpointer(
+        checkpoint_path if checkpoint_path is not None else checkpoint_path_for_engine(engine),
+    )
     dispute_workflow = DisputeWorkflowRunner(
         accounts=accounts,
         transactions=transactions,
         disputes=disputes,
+        checkpointer=saver,
         tracing=tracing_service,
     )
     return Container(
@@ -103,4 +111,7 @@ def build_container_from_engine(
 
 def build_container(database_url: str | None = None) -> Container:
     """Assemble a container for the configured database."""
-    return build_container_from_engine(build_engine(database_url or settings.database_url))
+    return build_container_from_engine(
+        build_engine(database_url or settings.database_url),
+        checkpoint_path=settings.resolved_checkpoint_path,
+    )

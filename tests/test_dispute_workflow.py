@@ -5,6 +5,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from src.app.container import build_container_from_engine
 from src.contracts.requests import CreateDisputeDraftRequest, SubmitDisputeCaseRequest
 from src.domain.enums import ApprovalDecision, DisputeCaseStatus, DisputeReasonCode, DisputeWorkflowStatus
 from src.domain.exceptions import ErrorCode
@@ -184,6 +185,27 @@ def test_declined_approval_does_not_register_a_case(container):
     assert decided.data.case_id is None
     assert decided.data.approval_id == approval.approval_id
     assert container.disputes.get_for_account(SCENARIO_ACCOUNT, "TXN-SCN-DUP-A") is None
+
+
+def test_pending_workflow_survives_container_rebuild(engine):
+    first = build_container_from_engine(engine)
+    request_id = "inv-dsp-restart"
+    assert_ok(_draft(first, request_id=request_id))
+    approval = _mint(
+        first,
+        request_id,
+        decision=ApprovalDecision.APPROVED,
+        note="Customer confirmed",
+    )
+
+    restarted = build_container_from_engine(engine)
+    decided = _submit(restarted, request_id=request_id, approval_id=approval.approval_id)
+
+    assert_ok(decided)
+    assert decided.data is not None
+    assert decided.data.registered is True
+    assert decided.data.workflow_status == DisputeWorkflowStatus.REGISTERED
+    assert restarted.disputes.get_for_account(SCENARIO_ACCOUNT, "TXN-SCN-DUP-A") is not None
 
 
 def test_create_draft_is_idempotent_while_pending_review(container):

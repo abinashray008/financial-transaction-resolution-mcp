@@ -14,6 +14,7 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "opik>=1.0.0",
     "langgraph>=1.0.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
 ]
 
 [dependency-groups]

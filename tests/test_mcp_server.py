@@ -6,6 +6,7 @@ import pytest
 from fastmcp import Client
 
 from src.app.container import Container
+from src.config.settings import settings
 from src.domain.enums import ApprovalDecision
 from src.server import create_mcp_server
 from tests.conftest import OTHER_ACCOUNT, SCENARIO_ACCOUNT
@@ -340,7 +341,7 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
     # Step 6: Gemini synthesis of the gathered tool envelopes.
     reply = synthesized.structured_content["data"]
     assert "duplicate likely" in reply["customer_response"]
-    assert reply["model_name"] == "gemini-2.5-pro"
+    assert reply["model_name"] == settings.gemini_model
 
     # Step 7: LangGraph returns a PENDING_REVIEW draft; no case is written yet.
     proposal = proposed.structured_content["data"]

@@ -21,6 +21,7 @@ from .routers.resources import register_mcp_resources
 from .routers.reviews import register_review_routes
 from .routers.tools import register_mcp_tools
 from .security.descope import AuthConfigurationError, resolve_runtime_auth
+from .security.reviewer import ReviewAuth, build_review_auth
 from .utils.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -53,12 +54,14 @@ def create_mcp_server(
     container: Container | None = None,
     *,
     auth: AuthProvider | None = None,
+    review_auth: ReviewAuth | None = None,
 ) -> FastMCP:
     """Create and configure the MCP server instance.
 
     Accepts a container so tests can point the server at their own database.
     Pass ``auth`` only for HTTP: Descope validates bearer tokens at the transport
-    layer. Stdio and in-process tests leave ``auth`` unset.
+    layer. Stdio and in-process tests leave ``auth`` unset. Review HTTP routes
+    use ``review_auth`` (verified JWT by default; ``local-demo`` is opt-in).
     """
     configure_logging(settings.log_level)
     configure_opik()
@@ -90,7 +93,11 @@ def create_mcp_server(
     register_mcp_resources(mcp, resolved)
     register_mcp_prompts(mcp)
     register_http_status_routes(mcp, auth_enabled=auth is not None)
-    register_review_routes(mcp, resolved, auth_enabled=auth is not None)
+    register_review_routes(
+        mcp,
+        resolved,
+        review_auth=review_auth or build_review_auth(auth=auth),
+    )
     return mcp
 
 

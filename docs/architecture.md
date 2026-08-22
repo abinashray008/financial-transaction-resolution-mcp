@@ -16,12 +16,12 @@ Dependencies point inward. Nothing in `domain/` imports from `contracts/`, `repo
 | Transport | `src/server.py` | Build the FastMCP app, set instructions, run stdio or Descope-authenticated HTTP. | Routers, container, config, `src/security/descope.py` |
 | Registration | `src/routers/` | Declare tools, prompts, resources and the human review HTTP routes. Translate MCP arguments into request contracts. | Handlers, contracts |
 | Handlers | `src/tools/` | Validate identifiers, call a service or repository, present the result. | App, contracts, domain |
-| Workflows | `src/workflows/` | LangGraph HITL dispute registration (`interrupt` / `Command`). | Domain, repositories |
+| Workflows | `src/workflows/` | LangGraph HITL dispute registration (`interrupt` / `Command`) with a durable checkpointer. | Domain, repositories |
 | Application | `src/app/` | Cross-cutting execution, composition root, validators, presenters, data generation. | Contracts, domain, repositories, audit, security, workflows |
 | Contracts | `src/contracts/` | Pydantic request and response models and the shared envelope. | Domain enums and error codes |
 | Domain | `src/domain/` | Models, validated criteria, analysis services, error taxonomy. | Nothing else in the project |
 | Persistence | `src/repositories/` | SQLAlchemy tables, sessions, account-scoped queries, row mapping. | Domain |
-| Cross-cutting | `src/security/`, `src/audit/`, `src/observability/`, `src/utils/`, `src/config/` | Masking, Descope HTTP auth, audit writes, Opik traces, logging, settings. | Domain, repositories |
+| Cross-cutting | `src/security/`, `src/audit/`, `src/observability/`, `src/utils/`, `src/config/` | Masking, Descope HTTP auth, verified reviewer identity, audit writes, Opik traces, logging, settings. | Domain, repositories |
 
 ## Request lifecycle
 
@@ -81,6 +81,10 @@ account id, outcome, duration and token counts — never descriptors, names or t
 services are constructed. `create_mcp_server()` accepts one, so tests build a container over a
 temporary SQLite file and drive the whole stack — routers included — without touching the real
 dataset. Handlers receive the container as their first argument rather than importing globals.
+The container also opens the LangGraph SQLite checkpointer (`src/workflows/checkpointer.py`). Tests
+keep a sibling `*.checkpoints.db` next to the temporary dataset so paused threads stay isolated;
+the demo process uses `CHECKPOINT_PATH` (`data/checkpoints.db`). Production should pass a
+`PostgresSaver` instead.
 
 Repositories take a `sessionmaker` and open a short-lived session per call. With stdio or a single
 HTTP listener plus SQLite that is simple and safe; there is no ambient session to leak between requests.
@@ -97,6 +101,11 @@ HTTP listener plus SQLite that is simple and safe; there is no ambient session t
 | `dispute_cases` | Human-approved synthetic case files | Written only after a verified one-time `approval_id` |
 | `approval_records` | Minted human decisions | Created by the review app with `reviewer_id`; consumed once by `submit_dispute_case` |
 
+LangGraph HITL checkpoints live in a **separate** SQLite file (`CHECKPOINT_PATH`, default
+`data/checkpoints.db`), not in these SQLAlchemy tables. That is the demo checkpointer
+(`SqliteSaver`). A production deployment should use PostgreSQL (`PostgresSaver` from
+`langgraph-checkpoint-postgres`) so paused threads can be shared across processes.
+
 The domain sees frozen dataclasses (`src/domain/models.py`), never ORM rows. `src/repositories/mappers.py`
 is the only translation point.
 
@@ -112,17 +121,20 @@ randomness, no model calls. Customer-facing narrative synthesis lives outside th
 `src/llm/` and the `synthesize_investigation` tool.
 
 **Human-in-the-loop dispute registration.** After synthesis, `create_dispute_draft` runs a LangGraph
-graph (`src/workflows/dispute_case.py`) with an `InMemorySaver` checkpointer. The graph loads the
-account-scoped transaction, builds a `PENDING_REVIEW` draft (reason code, verified/missing evidence,
-applied policy, proposed action, draft hash) from stored facts plus the investigation findings,
-then calls `interrupt()`. Creating the draft does not require approval and no `dispute_cases` row
-exists yet. A human reviewer records a decision at `GET/POST /reviews/{request_id}` using their
-authenticated identity. That path mints a one-time `approval_id` bound to `request_id` and
-`draft_hash`. `submit_dispute_case` accepts only `{request_id, approval_id}` — not `approved=true` —
-verifies the record (match, expiry, unused), consumes it, then resumes the same thread with
-`Command(resume=…)`. Only an `approved` decision inserts a row, and that row's `customer_id` is
-taken from the account — never from the caller. A declined record ends the graph without a write.
-The customer's name never enters graph state or the MCP response.
+graph (`src/workflows/dispute_case.py`) with a SQLite checkpointer (`SqliteSaver`). Approval records
+live in the dataset database; paused graph state lives in `CHECKPOINT_PATH` so a process restart
+does not drop `PENDING_REVIEW` drafts. Production should replace this with `PostgresSaver`. The
+graph loads the account-scoped transaction, builds a `PENDING_REVIEW` draft (reason code,
+verified/missing evidence, applied policy, proposed action, draft hash) from stored facts plus the
+investigation findings, then calls `interrupt()`. Creating the draft does not require approval and
+no `dispute_cases` row exists yet. A human reviewer records a decision at
+`GET/POST /reviews/{request_id}` using a verified JWT (`sub` plus a `dispute:review` scope). That path mints a one-time
+`approval_id` bound to `request_id` and `draft_hash`. `submit_dispute_case` accepts only
+`{request_id, approval_id}` — not `approved=true` — verifies the record (match, expiry, unused),
+consumes it, then resumes the same thread with `Command(resume=…)`. Only an `approved` decision
+inserts a row, and that row's `customer_id` is taken from the account — never from the caller. A
+declined record ends the graph without a write. The customer's name never enters graph state or
+the MCP response.
 
 **`MerchantResolverService`** normalizes a descriptor (upper-case, strip punctuation, drop leading
 aggregator prefixes such as `SQ *`, drop store numbers of three or more digits, drop noise tokens like
@@ -174,6 +186,13 @@ requests are rejected at the transport layer before any tool runs. Stdio and in-
 attach the provider: OAuth DCR is not a stdio protocol. HTTP refuses to bind if the well-known URL
 is missing or not a Descope MCP Server / inbound-app URL.
 
+**Reviewer identity is a verified JWT claim, not a client-supplied field.** FastMCP's Descope
+middleware wraps `/mcp` only. Both `GET /reviews/{request_id}` and
+`POST /reviews/{request_id}/decision` authenticate in `src/security/reviewer.py`: the bearer JWT
+signature, issuer, audience and expiry are verified, identity is taken from `sub`, and a
+`dispute:review` scope or role is required. `X-Reviewer-Id` and HTML form reviewer ids are accepted
+only when `REVIEW_AUTH_MODE=local-demo`. Unsigned JWT payloads are never trusted.
+
 **Account scoping is structural.** Every transaction query in `src/repositories/transactions.py`
 carries `account_id` in its `WHERE` clause. There is no "fetch by id, then check ownership" path,
 because that shape is one careless refactor away from a leak.
@@ -223,7 +242,7 @@ envelope still cannot carry internals to a client.
 | Isolation | Cross-account access from both directions, plus indistinguishability of foreign and missing ids |
 | Prompt injection | Identifier interpolation, Gemini fencing, forged policy documents, control characters in free text |
 | Data | Determinism under a fixed seed, idempotent regeneration, no date drift |
-| Protocol | Tool, prompt and resource discovery, annotations, schemas, a full investigation, HITL dispute registration through a real `Client`, and Descope HTTP wiring without a live tenant |
+| Protocol | Tool, prompt and resource discovery, annotations, schemas, a full investigation, HITL dispute registration through a real `Client`, checkpoint survival across a container rebuild, Descope HTTP wiring without a live tenant, and review-route JWT identity (signature, issuer, audience, expiry, `dispute:review`) |
 
 Tests never reach for module-level globals; they build a `Container` and inject it, which is the same
 seam `create_mcp_server()` uses.

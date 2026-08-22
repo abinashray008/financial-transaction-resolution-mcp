@@ -138,7 +138,8 @@ or `policy://fees/late-payment`), calls the evidence tools, and finishes with
 final customer-facing narrative from the gathered envelopes and the selected policy. If the end user
 then wants a dispute case, `create_dispute_draft` starts a LangGraph graph and returns a
 `PENDING_REVIEW` proposal without writing a case. A human reviewer mints a one-time `approval_id`
-at `/reviews/{request_id}`; `submit_dispute_case` accepts only `request_id` and `approval_id` and
+at `/reviews/{request_id}` after presenting a verified JWT (`sub` plus `dispute:review`);
+`submit_dispute_case` accepts only `request_id` and `approval_id` and
 writes `dispute_cases` only when that record is an unused, unexpired approval.
 
 The only external API is Google Gemini (`google-genai`, default model `gemini-2.5-pro`), and only
@@ -187,7 +188,9 @@ configuration.
   `get_transaction_details`, `resolve_merchant`, `check_duplicate_charge`, `get_audit_trace`,
   `synthesize_investigation`, `create_dispute_draft`, `submit_dispute_case`).
 - `src/workflows/dispute_case.py` — LangGraph graph: load context, build a PENDING_REVIEW draft,
-  interrupt, persist only after a verified approval record.
+  interrupt, persist only after a verified approval record. SQLite-checkpointed so pending drafts
+  survive restarts (PostgreSQL in production).
+- `src/workflows/checkpointer.py` — Demo `SqliteSaver` factory. Production should use `PostgresSaver`.
 - `src/prompts/investigate_transaction_prompt.py` — Agentic workflow text, including the ask-the-caller
   gate and the post-synthesis human-approval phase.
 - `src/resources/` — Server status plus unrecognized-transaction, foreign-transaction-fee and
@@ -206,6 +209,7 @@ configuration.
 - `src/app/container.py`, `execution.py`, `presenters.py`, `validators.py`, `data_seed.py`
 - `src/security/masking.py` — Account and card masking.
 - `src/security/descope.py` — Descope well-known URL parsing and `DescopeProvider` construction.
+- `src/security/reviewer.py` — Review-route auth: verified JWT identity, or explicit `local-demo`.
 - `src/audit/service.py` — Append-only sanitized audit events.
 - `src/observability/tracing.py` — Optional Opik traces, Gemini token usage and latency, HITL graph.
 - `src/llm/gemini_client.py` — The only module that calls a model.
@@ -224,9 +228,10 @@ All data is invented for this project. Nothing is scraped or licensed from a fin
 - **Name:** Synthetic card-transaction dataset
 - **Source:** Generated in-repo by `src/app/data_seed.py` via `scripts/generate_data.py`
 - **Storage:** `data/transactions.db` (SQLite; gitignored). Recreate with
-  `uv run python scripts/generate_data.py --seed 42`
+  `uv run python scripts/generate_data.py --seed 42`. Paused LangGraph dispute threads are stored
+  separately in `data/checkpoints.db` (also gitignored).
 - **Format:** SQLite tables `customers`, `accounts`, `merchants`, `transactions`, `audit_events`,
-  `dispute_cases`
+  `dispute_cases`, `approval_records`
 - **Preprocessing:** None. Tables are dropped and recreated on each run. Dates are anchored to a
   fixed reference date (`2026-06-30`), so the dataset does not drift.
 - **License / attribution:** Original synthetic content under this repository's MIT license.
@@ -298,8 +303,8 @@ Features implemented beyond the course minimum, with a brief description of each
 | **Escaped `LIKE` wildcards** | A `%` or `_` in `merchant_query` cannot widen the SQL search. |
 | **Cross-account isolation** | Every transaction query includes `account_id` in `WHERE`. A charge on another account returns the same `TRANSACTION_NOT_FOUND` as a missing id. |
 | **Opik agent observability** | Optional [Opik](https://www.comet.com/docs/opik/) tracing (`src/observability/tracing.py`). MCP tool calls become spans grouped by `request_id`; Gemini synthesis is `@track`'d for token usage and LLM call latency; the HITL LangGraph workflow is wrapped with `track_langgraph`. Payloads are sanitized (no names, descriptors or transaction bodies). |
-| **LangGraph human-in-the-loop disputes** | After synthesis, `create_dispute_draft` interrupts a LangGraph graph with a `PENDING_REVIEW` proposal. A human reviewer records a decision at `/reviews/{request_id}` (authenticated `reviewer_id`) and receives a one-time `approval_id`. `submit_dispute_case` verifies that id before writing. An approved record inserts a `dispute_cases` row for the same `customer_id` as the account; a decline writes nothing. |
-| **Descope HTTP authentication** | `--transport http` uses FastMCP's `DescopeProvider`. MCP clients register via Dynamic Client Registration and send a Descope JWT. Stdio stays local-trust and does not speak OAuth. |
+| **LangGraph human-in-the-loop disputes** | After synthesis, `create_dispute_draft` interrupts a LangGraph graph with a `PENDING_REVIEW` proposal. The demo persists paused threads with a SQLite checkpointer (`CHECKPOINT_PATH`) so they survive process restarts; production should use PostgreSQL (`PostgresSaver`). A human reviewer records a decision at `/reviews/{request_id}` with a verified JWT (`sub` plus `dispute:review`). That mints a one-time `approval_id`. `submit_dispute_case` verifies that id before writing. An approved record inserts a `dispute_cases` row for the same `customer_id` as the account; a decline writes nothing. |
+| **Descope HTTP authentication** | `--transport http` uses FastMCP's `DescopeProvider`. MCP clients register via Dynamic Client Registration and send a Descope JWT. Custom `/reviews/*` routes are not wrapped by that middleware; they verify JWTs themselves (`src/security/reviewer.py`) and require `dispute:review`. Stdio stays local-trust and does not speak OAuth. |
 | **Prompt-injection hardening** | Prompt arguments are interpolated only when they match identifier patterns. Gemini fences untrusted findings, uses a server-loaded policy, and rejects host-agent hijack output. Free-text fields reject control characters. |
 
 ## Setup Instructions
@@ -406,6 +411,9 @@ SERVER_VERSION=0.1.0
 # SQLite file relative to the project root (no credentials)
 DATABASE_PATH=data/transactions.db
 
+# SQLite file for LangGraph HITL checkpoints (demo). Production: PostgreSQL.
+CHECKPOINT_PATH=data/checkpoints.db
+
 # Stderr logger: DEBUG, INFO, WARNING or ERROR
 LOG_LEVEL=INFO
 
@@ -435,6 +443,11 @@ HTTP_PORT=8000
 
 # How long a minted dispute approval_id remains usable
 APPROVAL_TTL_SECONDS=900
+
+# Review-route identity. jwt (default) verifies bearer JWTs on GET/POST /reviews/*
+# and takes reviewer_id from the token sub. local-demo allows form/header ids.
+REVIEW_AUTH_MODE=jwt
+REVIEW_REQUIRED_SCOPE=dispute:review
 ```
 
 | Variable | Required to run? | Default | What it does | How to obtain |
@@ -442,6 +455,7 @@ APPROVAL_TTL_SECONDS=900
 | `SERVER_NAME` | No | `financial-transaction-resolution` | Name advertised to MCP clients | Choose freely; not a secret |
 | `SERVER_VERSION` | No | `0.1.0` | Version advertised to MCP clients | Choose freely; not a secret |
 | `DATABASE_PATH` | No | `data/transactions.db` | SQLite file for the synthetic dataset | Local path; no credentials |
+| `CHECKPOINT_PATH` | No | `data/checkpoints.db` | SQLite file for LangGraph HITL checkpoints so pending drafts survive restarts. Demo only; production should use PostgreSQL. | Local path; no credentials |
 | `LOG_LEVEL` | No | `INFO` | Stderr log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | Choose freely |
 | `GEMINI_API_KEY` | Only for `synthesize_investigation` | _(empty)_ | Google Gemini API key. **Not** `OPENAI_API_KEY`. | Create a key at [Google AI Studio](https://aistudio.google.com/apikey) |
 | `GEMINI_MODEL` | No | `gemini-2.5-pro` | Gemini model id for synthesis | A Gemini model id from AI Studio; default is fine |
@@ -456,6 +470,8 @@ APPROVAL_TTL_SECONDS=900
 | `HTTP_HOST` | HTTP only | `127.0.0.1` | Bind address for `--transport http` | Use `0.0.0.0` only if you intend to listen beyond loopback |
 | `HTTP_PORT` | HTTP only | `8000` | Bind port for `--transport http` | Choose freely |
 | `APPROVAL_TTL_SECONDS` | No | `900` | Lifetime of a minted dispute `approval_id` | 60–86400 seconds |
+| `REVIEW_AUTH_MODE` | No | `jwt` | How `/reviews/*` identifies the reviewer. `jwt` verifies signature, issuer, audience and expiry, then uses `sub`. `local-demo` allows `X-Reviewer-Id` and the HTML form — local demos only | `jwt` or `local-demo` |
+| `REVIEW_REQUIRED_SCOPE` | No | `dispute:review` | Scope or role a verified reviewer JWT must include | Choose freely; grant it only to human reviewers |
 
 **Important:**
 
@@ -657,7 +673,10 @@ uv run python -m src.server --transport http
 ```
 
 The client should discover Descope from protected-resource metadata, register itself (DCR), and
-send a bearer JWT. Unauthenticated HTTP calls are rejected at the transport layer.
+send a bearer JWT. Unauthenticated `/mcp` calls are rejected at the transport layer. The human
+review app at `/reviews/{request_id}` is a custom route, so it verifies JWTs itself: signature,
+issuer, audience, expiry, then `sub` plus a `dispute:review` scope or role. Set
+`REVIEW_AUTH_MODE=local-demo` only if you need the HTML form to accept a reviewer id locally.
 
 ## Testing
 
@@ -679,7 +698,9 @@ categories, audit sanitization, data reproducibility under a fixed seed, MCP too
 discovery, Gemini synthesis (with an injected client), Opik observability (with an injected sink),
 and an end-to-end investigation through a real FastMCP `Client`. Descope wiring is unit-tested
 without contacting a live tenant: HTTP refuses to start without a well-known URL; stdio does not
-require one.
+require one. Review-route identity is tested with locally signed JWTs (signature, issuer, audience,
+expiry, and `dispute:review`); unsigned payloads, spoofed headers, and HTML form ids are rejected
+except in explicit `local-demo` mode.
 
 ## Troubleshooting
 

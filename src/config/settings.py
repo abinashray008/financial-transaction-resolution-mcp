@@ -1,8 +1,9 @@
 """Server configuration, loaded from the environment or a local ``.env`` file."""
 
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +35,14 @@ class Settings(BaseSettings):
         default="data/transactions.db",
         alias="DATABASE_PATH",
         description="SQLite file holding the synthetic dataset, relative to the project root.",
+    )
+    checkpoint_path: str = Field(
+        default="data/checkpoints.db",
+        alias="CHECKPOINT_PATH",
+        description=(
+            "SQLite file for LangGraph HITL workflow checkpoints, relative to the project root. "
+            "Demo only; production should use PostgreSQL (PostgresSaver)."
+        ),
     )
     log_level: str = Field(
         default="INFO",
@@ -107,6 +116,35 @@ class Settings(BaseSettings):
         ge=60,
         le=86_400,
     )
+    review_auth_mode: Literal["jwt", "local-demo"] = Field(
+        default="jwt",
+        alias="REVIEW_AUTH_MODE",
+        description=(
+            "jwt: reviewer identity comes from a verified JWT. "
+            "local-demo: allow X-Reviewer-Id and HTML form reviewer ids (local only)."
+        ),
+    )
+    review_required_scope: str = Field(
+        default="dispute:review",
+        alias="REVIEW_REQUIRED_SCOPE",
+        description="Scope or role a verified reviewer JWT must include.",
+        min_length=1,
+        max_length=128,
+    )
+
+    @field_validator("review_auth_mode", mode="before")
+    @classmethod
+    def _normalize_review_auth_mode(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("review_required_scope", mode="before")
+    @classmethod
+    def _strip_review_required_scope(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
     @property
     def descope_configured(self) -> bool:
@@ -118,6 +156,15 @@ class Settings(BaseSettings):
         """Absolute path of the SQLite file."""
         candidate = Path(self.database_path)
         return candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
+
+    @property
+    def resolved_checkpoint_path(self) -> str:
+        """Path passed to the LangGraph SQLite checkpointer."""
+        if self.checkpoint_path == IN_MEMORY_DATABASE:
+            return IN_MEMORY_DATABASE
+        candidate = Path(self.checkpoint_path)
+        resolved = candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
+        return str(resolved)
 
     @property
     def database_url(self) -> str:

@@ -3,6 +3,9 @@
 The graph loads account-scoped evidence, pauses for an explicit human
 approval, and only then writes a row to ``dispute_cases``. Declining leaves
 the database unchanged. Customer names never enter graph state.
+
+Paused threads are stored in a SQLite checkpointer so a process restart does
+not drop ``PENDING_REVIEW`` drafts. Production should use PostgreSQL.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, NotRequired, TypedDict
 
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
@@ -35,6 +38,7 @@ from ..repositories.accounts import AccountRepository
 from ..repositories.disputes import DisputeRepository
 from ..repositories.transactions import TransactionRepository
 from ..security.masking import mask_account_id
+from .checkpointer import build_sqlite_checkpointer
 
 _NOT_FOUND_MESSAGE = "No transaction with that transaction_id exists on the supplied account."
 _APPROVAL_MESSAGE = (
@@ -167,7 +171,7 @@ class DisputeWorkflowRunner:
         accounts: AccountRepository,
         transactions: TransactionRepository,
         disputes: DisputeRepository,
-        checkpointer: InMemorySaver | None = None,
+        checkpointer: BaseCheckpointSaver[str] | None = None,
         clock: Callable[[], datetime] = _utc_now,
         id_factory: Callable[[], str] = _case_id_factory,
         tracing: TracingService | None = None,
@@ -177,7 +181,7 @@ class DisputeWorkflowRunner:
         self._disputes = disputes
         self._clock = clock
         self._id_factory = id_factory
-        compiled = self._compile(checkpointer or InMemorySaver())
+        compiled = self._compile(checkpointer or build_sqlite_checkpointer(":memory:"))
         self._graph = tracing.wrap_langgraph(compiled) if tracing is not None else compiled
 
     @track_workflow("dispute_workflow.propose")
@@ -307,7 +311,7 @@ class DisputeWorkflowRunner:
                 "No dispute proposal is awaiting approval for this request_id and account.",
             )
 
-    def _compile(self, checkpointer: InMemorySaver) -> Any:
+    def _compile(self, checkpointer: BaseCheckpointSaver[str]) -> Any:
         accounts = self._accounts
         transactions = self._transactions
         disputes = self._disputes
