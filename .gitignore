@@ -1,0 +1,33 @@
+# Environments and secrets
+.venv/
+venv/
+.env
+.env.local
+
+# Generated synthetic dataset
+data/*.db
+data/*.db-journal
+data/*.sqlite3
+
+# Runtime logs
+*.log
+logs/
+
+# Python caches and build output
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/

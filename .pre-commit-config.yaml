@@ -1,0 +1,26 @@
+# Git hooks that lint and format Python, plus a few file-hygiene checks.
+# Install once after `uv sync`:  uv run pre-commit install
+# Run against the whole tree:    uv run pre-commit run --all-files
+default_language_version:
+  python: python3.14
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: debug-statements
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.3
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
