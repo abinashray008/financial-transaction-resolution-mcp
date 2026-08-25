@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from src.app.container import build_container_from_engine
 from src.config.settings import Settings
 from src.contracts.requests import GetAccountSummaryRequest, SynthesizeInvestigationRequest
-from src.contracts.responses import SynthesisResult
+from src.contracts.responses import GeminiSynthesisResult
 from src.llm.gemini_client import GeminiSynthesisClient, _token_usage_from_response
 from src.observability.tracing import (
     TokenUsage,
@@ -156,7 +156,7 @@ def test_gemini_client_attaches_usage_to_open_span():
 
     assert synthesized == result
     assert captured["config"].response_mime_type == "application/json"
-    assert captured["config"].response_schema is SynthesisResult
+    assert captured["config"].response_schema is GeminiSynthesisResult
     assert sink.events[0].usage == TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
     assert sink.events[0].model_name == "gemini-2.5-pro"
     assert sink.events[0].account_id_masked == mask_account_id(SCENARIO_ACCOUNT)

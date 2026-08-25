@@ -7,7 +7,7 @@ from fastmcp import Client
 
 from src.app.container import Container
 from src.config.settings import settings
-from src.contracts.responses import SynthesisResult
+from src.contracts.responses import GeminiSynthesisResult
 from src.domain.enums import ApprovalDecision
 from src.server import create_mcp_server
 from tests.conftest import OTHER_ACCOUNT, SCENARIO_ACCOUNT
@@ -220,13 +220,10 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
             transaction_id: str,
             investigation_findings: str,
             trusted_policy: str | None = None,
-        ) -> SynthesisResult:
-            return SynthesisResult(
+        ) -> GeminiSynthesisResult:
+            return GeminiSynthesisResult(
                 customer_response=f"Verified: duplicate likely for {transaction_id} on {account_id}.",
                 recommended_action="CREATE_DISPUTE_DRAFT",
-                case_status="NOT_CREATED",
-                claims_refund_issued=False,
-                claims_transaction_reversed=False,
             )
 
     container = build_container_from_engine(engine, synthesis=FakeSynthesisClient())
@@ -350,9 +347,6 @@ async def test_end_to_end_investigation_of_a_duplicate_charge(engine):
     assert "duplicate likely" in reply["customer_response"]
     assert reply["model_name"] == settings.gemini_model
     assert reply["recommended_action"] == "CREATE_DISPUTE_DRAFT"
-    assert reply["case_status"] == "NOT_CREATED"
-    assert reply["claims_refund_issued"] is False
-    assert reply["claims_transaction_reversed"] is False
 
     # Step 7: LangGraph returns a PENDING_REVIEW draft; no case is written yet.
     proposal = proposed.structured_content["data"]

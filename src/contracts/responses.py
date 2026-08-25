@@ -178,7 +178,7 @@ class AuditTraceResponse(ToolResponseBase):
     data: AuditTraceData | None = None
 
 
-class SynthesisResult(_Payload):
+class GeminiSynthesisResult(_Payload):
     """Structured Gemini output for ``synthesize_investigation``."""
 
     customer_response: str = Field(
@@ -190,21 +190,9 @@ class SynthesisResult(_Payload):
         "REQUEST_MORE_INFORMATION",
         "CREATE_DISPUTE_DRAFT",
     ] = Field(description="Exactly one next action after the customer-facing reply is shown.")
-    case_status: Literal[
-        "NOT_CREATED",
-        "PENDING_HUMAN_REVIEW",
-        "APPROVED",
-        "SUBMITTED",
-    ] = Field(description="Dispute case status supported by the findings. Synthesis never creates a case.")
-    claims_refund_issued: bool = Field(
-        description="True only when customer_response states that a refund was issued.",
-    )
-    claims_transaction_reversed: bool = Field(
-        description="True only when customer_response states that the transaction was reversed.",
-    )
 
 
-class SynthesisData(SynthesisResult):
+class SynthesisData(GeminiSynthesisResult):
     """Result of ``synthesize_investigation``."""
 
     model_name: str = Field(description="Gemini model that produced the reply.")

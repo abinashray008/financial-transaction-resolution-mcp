@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from src.app.container import Container, build_container_from_engine
 from src.config.settings import settings
 from src.contracts.requests import SynthesizeInvestigationRequest
-from src.contracts.responses import SynthesisResult
+from src.contracts.responses import GeminiSynthesisResult
 from src.domain.exceptions import ErrorCode, SynthesisUnavailableError
 from src.llm.gemini_client import parse_synthesis_result
 from src.tools.synthesize_investigation_tool import synthesize_investigation
@@ -25,22 +25,11 @@ def canned_synthesis_result(
         "REQUEST_MORE_INFORMATION",
         "CREATE_DISPUTE_DRAFT",
     ] = "CREATE_DISPUTE_DRAFT",
-    case_status: Literal[
-        "NOT_CREATED",
-        "PENDING_HUMAN_REVIEW",
-        "APPROVED",
-        "SUBMITTED",
-    ] = "NOT_CREATED",
-    claims_refund_issued: bool = False,
-    claims_transaction_reversed: bool = False,
-) -> SynthesisResult:
+) -> GeminiSynthesisResult:
     """Deterministic structured reply used by fake Gemini clients."""
-    return SynthesisResult(
+    return GeminiSynthesisResult(
         customer_response=customer_response,
         recommended_action=recommended_action,
-        case_status=case_status,
-        claims_refund_issued=claims_refund_issued,
-        claims_transaction_reversed=claims_transaction_reversed,
     )
 
 
@@ -57,7 +46,7 @@ class FakeSynthesisClient:
         transaction_id: str,
         investigation_findings: str,
         trusted_policy: str | None = None,
-    ) -> SynthesisResult:
+    ) -> GeminiSynthesisResult:
         self.calls.append(
             {
                 "account_id": account_id,
@@ -106,9 +95,6 @@ def test_synthesize_investigation_uses_injected_client(synthesis_container):
     assert "likely duplicate" in response.data.customer_response
     assert response.data.model_name == settings.gemini_model
     assert response.data.recommended_action == "CREATE_DISPUTE_DRAFT"
-    assert response.data.case_status == "NOT_CREATED"
-    assert response.data.claims_refund_issued is False
-    assert response.data.claims_transaction_reversed is False
     assert len(fake.calls) == 1
     assert fake.calls[0]["account_id"] == SCENARIO_ACCOUNT
     assert fake.calls[0]["transaction_id"] == "TXN-SCN-DUP-A"
@@ -182,26 +168,10 @@ def test_synthesize_investigation_requires_api_key_without_client(engine, monkey
 
 def test_synthesis_result_rejects_unknown_recommended_action():
     with pytest.raises(ValidationError):
-        SynthesisResult.model_validate(
+        GeminiSynthesisResult.model_validate(
             {
                 "customer_response": "ok",
                 "recommended_action": "FILE_NOW",
-                "case_status": "NOT_CREATED",
-                "claims_refund_issued": False,
-                "claims_transaction_reversed": False,
-            }
-        )
-
-
-def test_synthesis_result_rejects_unknown_case_status():
-    with pytest.raises(ValidationError):
-        SynthesisResult.model_validate(
-            {
-                "customer_response": "ok",
-                "recommended_action": "NO_ACTION",
-                "case_status": "RESOLVED",
-                "claims_refund_issued": False,
-                "claims_transaction_reversed": False,
             }
         )
 

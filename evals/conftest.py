@@ -18,7 +18,7 @@ from tests.conftest import engine as engine
 from tests.test_synthesis import FakeSynthesisClient, canned_synthesis_result
 
 from src.app.container import Container, build_container_from_engine
-from src.contracts.responses import SynthesisResult
+from src.contracts.responses import GeminiSynthesisResult
 
 
 class ScorecardAwareFake(FakeSynthesisClient):
@@ -35,7 +35,7 @@ class ScorecardAwareFake(FakeSynthesisClient):
         transaction_id: str,
         investigation_findings: str,
         trusted_policy: str | None = None,
-    ) -> SynthesisResult:
+    ) -> GeminiSynthesisResult:
         super().synthesize(
             account_id=account_id,
             transaction_id=transaction_id,

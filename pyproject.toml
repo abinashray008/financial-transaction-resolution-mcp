@@ -74,6 +74,7 @@ docstring-code-format = true
 python_version = "3.14"
 strict = true
 plugins = ["pydantic.mypy"]
+files = ["src", "scripts", "evals"]
 
 [[tool.mypy.overrides]]
 module = "tests.*"

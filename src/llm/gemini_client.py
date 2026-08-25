@@ -17,7 +17,7 @@ from google import genai
 from google.genai import types
 from pydantic import ValidationError
 
-from ..contracts.responses import SynthesisResult
+from ..contracts.responses import GeminiSynthesisResult
 from ..domain.exceptions import SynthesisUnavailableError
 from ..observability.tracing import TokenUsage, TracingService, track_llm
 from ..security.prompt_injection import looks_like_host_agent_hijack, wrap_untrusted
@@ -64,13 +64,6 @@ Return JSON that matches the required schema:
 - recommended_action: exactly one of NO_ACTION (investigation complete, no dispute warranted),
   REQUEST_MORE_INFORMATION (evidence is incomplete), or CREATE_DISPUTE_DRAFT (a draft may be
   appropriate after the customer asks; this is not approval to file).
-- case_status: the dispute case status supported by the findings. This step does not create a case,
-  so use NOT_CREATED unless the findings already show a later status. Never use APPROVED or
-  SUBMITTED.
-- claims_refund_issued: true only if customer_response states that a refund was issued. This must
-  be false.
-- claims_transaction_reversed: true only if customer_response states that the transaction was
-  reversed. This must be false.
 """
 
 
@@ -84,7 +77,7 @@ class SynthesisClient(Protocol):
         transaction_id: str,
         investigation_findings: str,
         trusted_policy: str | None = None,
-    ) -> SynthesisResult:
+    ) -> GeminiSynthesisResult:
         """Return the structured synthesis result."""
 
 
@@ -151,7 +144,7 @@ class GeminiSynthesisClient:
         transaction_id: str,
         investigation_findings: str,
         trusted_policy: str | None = None,
-    ) -> SynthesisResult:
+    ) -> GeminiSynthesisResult:
         """Ask Gemini to synthesize the gathered tool payloads into a typed result."""
         user_prompt = build_synthesis_user_prompt(
             account_id=account_id,
@@ -168,7 +161,7 @@ class GeminiSynthesisClient:
                     system_instruction=SYSTEM_INSTRUCTIONS,
                     temperature=0.2,
                     response_mime_type="application/json",
-                    response_schema=SynthesisResult,
+                    response_schema=GeminiSynthesisResult,
                 ),
             )
         except Exception as error:
@@ -190,8 +183,8 @@ class GeminiSynthesisClient:
         self._tracing.attach_llm_usage(model_name=self._model, usage=usage, duration_ms=duration_ms)
 
 
-def parse_synthesis_result(response: object) -> SynthesisResult:
-    """Validate Gemini output against ``SynthesisResult`` and reject host-agent hijacks."""
+def parse_synthesis_result(response: object) -> GeminiSynthesisResult:
+    """Validate Gemini output against ``GeminiSynthesisResult`` and reject host-agent hijacks."""
     result = _coerce_synthesis_result(response)
     if looks_like_host_agent_hijack(result.customer_response):
         logger.warning("Gemini synthesis output was rejected as a host-agent hijack attempt")
@@ -201,13 +194,13 @@ def parse_synthesis_result(response: object) -> SynthesisResult:
     return result
 
 
-def _coerce_synthesis_result(response: object) -> SynthesisResult:
+def _coerce_synthesis_result(response: object) -> GeminiSynthesisResult:
     parsed = getattr(response, "parsed", None)
-    if isinstance(parsed, SynthesisResult):
+    if isinstance(parsed, GeminiSynthesisResult):
         return parsed
     if parsed is not None:
         try:
-            return SynthesisResult.model_validate(parsed)
+            return GeminiSynthesisResult.model_validate(parsed)
         except ValidationError:
             pass
 
@@ -217,9 +210,9 @@ def _coerce_synthesis_result(response: object) -> SynthesisResult:
             "The synthesis model returned an empty response. Retry the investigation.",
         )
     try:
-        return SynthesisResult.model_validate_json(text)
+        return GeminiSynthesisResult.model_validate_json(text)
     except ValidationError as error:
-        logger.warning("Gemini synthesis output did not match SynthesisResult: %s", error)
+        logger.warning("Gemini synthesis output did not match GeminiSynthesisResult: %s", error)
         raise SynthesisUnavailableError(
             "The synthesis model returned an unusable response. Retry the investigation.",
         ) from error
