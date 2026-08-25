@@ -139,7 +139,11 @@ steps that are still possible. Do not invent data a tool declined to return.
    - the same `request_id`
 7. Present the `customer_response` from `synthesize_investigation` to the end user as the primary
    answer. Do not rewrite it into a contradictory story. You may add a short preface noting that the
-   reply was synthesized from the tool evidence and the selected policy.
+   reply was synthesized from the tool evidence and the selected policy. Honor `recommended_action`
+   without skipping the human gate: `CREATE_DISPUTE_DRAFT` still requires asking the customer in
+   Phase D; `REQUEST_MORE_INFORMATION` means ask before drafting; `NO_ACTION` means stop unless they
+   still want a case. If `claims_refund_issued` or `claims_transaction_reversed` is true, do not tell
+   the customer that a refund or reversal happened.
 
 ### Phase D — human-in-the-loop dispute registration
 

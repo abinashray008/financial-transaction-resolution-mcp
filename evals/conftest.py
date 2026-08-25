@@ -15,9 +15,10 @@ os.environ["OPIK_TRACK_DISABLE"] = "true"
 import pytest
 from sqlalchemy import Engine
 from tests.conftest import engine as engine
-from tests.test_synthesis import FakeSynthesisClient
+from tests.test_synthesis import FakeSynthesisClient, canned_synthesis_result
 
 from src.app.container import Container, build_container_from_engine
+from src.contracts.responses import SynthesisResult
 
 
 class ScorecardAwareFake(FakeSynthesisClient):
@@ -34,7 +35,7 @@ class ScorecardAwareFake(FakeSynthesisClient):
         transaction_id: str,
         investigation_findings: str,
         trusted_policy: str | None = None,
-    ) -> str:
+    ) -> SynthesisResult:
         super().synthesize(
             account_id=account_id,
             transaction_id=transaction_id,
@@ -45,7 +46,7 @@ class ScorecardAwareFake(FakeSynthesisClient):
         transaction = parsed["get_transaction_details"]["data"]["transaction"]
         duplicate = parsed["check_duplicate_charge"]["data"]
         candidates = ", ".join(duplicate["candidate_transaction_ids"])
-        return (
+        return canned_synthesis_result(
             f"Verified facts: {transaction['merchant']} charged {transaction['amount']} "
             f"{transaction['currency']} on {transaction['transaction_id']}. "
             f"This looks like a duplicate (confidence {duplicate['confidence']}); "

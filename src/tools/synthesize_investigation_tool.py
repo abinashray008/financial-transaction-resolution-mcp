@@ -1,7 +1,8 @@
 """Handler for ``synthesize_investigation``.
 
-Takes the earlier tool envelopes and asks Gemini to produce a customer-facing
-reply. Analysis stays deterministic; only the final narrative uses the model.
+Takes the earlier tool envelopes and asks Gemini to produce a typed
+``SynthesisResult``. Analysis stays deterministic; only the final narrative
+uses the model.
 
 A policy document inside findings is dropped. If findings name a
 ``selected_policy_uri`` this server serves, that policy is loaded here and
@@ -19,7 +20,7 @@ from ..app.validators import (
 )
 from ..config.settings import settings
 from ..contracts.requests import SynthesizeInvestigationRequest
-from ..contracts.responses import SynthesisData, SynthesisResponse
+from ..contracts.responses import SynthesisData, SynthesisResponse, SynthesisResult
 from ..domain.exceptions import SynthesisUnavailableError
 from ..llm.gemini_client import GeminiSynthesisClient
 from ..resources.policies import drop_caller_policy_document, trusted_policy_json
@@ -53,7 +54,7 @@ def synthesize_investigation(
                 tracing=container.tracing,
             )
 
-        customer_response = client.synthesize(
+        result: SynthesisResult = client.synthesize(
             account_id=account_id,
             transaction_id=transaction_id,
             investigation_findings=untrusted_findings,
@@ -61,7 +62,11 @@ def synthesize_investigation(
         )
         return SynthesisData(
             model_name=settings.gemini_model,
-            customer_response=customer_response,
+            customer_response=result.customer_response,
+            recommended_action=result.recommended_action,
+            case_status=result.case_status,
+            claims_refund_issued=result.claims_refund_issued,
+            claims_transaction_reversed=result.claims_transaction_reversed,
         )
 
     return execute_tool(

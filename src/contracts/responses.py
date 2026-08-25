@@ -6,6 +6,7 @@ these models.
 """
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -177,11 +178,36 @@ class AuditTraceResponse(ToolResponseBase):
     data: AuditTraceData | None = None
 
 
-class SynthesisData(_Payload):
+class SynthesisResult(_Payload):
+    """Structured Gemini output for ``synthesize_investigation``."""
+
+    customer_response: str = Field(
+        min_length=1,
+        description="Customer-facing synthesis of the investigation findings.",
+    )
+    recommended_action: Literal[
+        "NO_ACTION",
+        "REQUEST_MORE_INFORMATION",
+        "CREATE_DISPUTE_DRAFT",
+    ] = Field(description="Exactly one next action after the customer-facing reply is shown.")
+    case_status: Literal[
+        "NOT_CREATED",
+        "PENDING_HUMAN_REVIEW",
+        "APPROVED",
+        "SUBMITTED",
+    ] = Field(description="Dispute case status supported by the findings. Synthesis never creates a case.")
+    claims_refund_issued: bool = Field(
+        description="True only when customer_response states that a refund was issued.",
+    )
+    claims_transaction_reversed: bool = Field(
+        description="True only when customer_response states that the transaction was reversed.",
+    )
+
+
+class SynthesisData(SynthesisResult):
     """Result of ``synthesize_investigation``."""
 
     model_name: str = Field(description="Gemini model that produced the reply.")
-    customer_response: str = Field(description="Customer-facing synthesis of the investigation findings.")
 
 
 class SynthesisResponse(ToolResponseBase):
