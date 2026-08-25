@@ -1,0 +1,18 @@
+{
+  "scenario_id": "duplicate_charge_001",
+  "input": {
+    "account_id": "ACCT-0001",
+    "transaction_id": "TXN-SCN-DUP-A",
+    "customer_concern": "I think I was charged twice at this merchant.",
+    "selected_policy_uri": "policy://disputes/unrecognized-transaction"
+  },
+  "expected": {
+    "merchant": "Halcyon Electronics",
+    "amount": "89.99",
+    "currency": "USD",
+    "duplicate_candidate": "TXN-SCN-DUP-B",
+    "duplicate_likely": true,
+    "confidence": "HIGH",
+    "requires_human_approval": true
+  }
+}
