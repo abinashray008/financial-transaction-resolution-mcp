@@ -4,8 +4,6 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![MCP](https://img.shields.io/badge/MCP-FastMCP-purple.svg)
 
-[![Watch the Financial Transaction Resolution MCP demo](demo/financial-transaction-resolution-demo-poster.png)](demo/financial-transaction-resolution-demo.mp4)
-
 ▶️ [Watch the demo video](demo/financial-transaction-resolution-demo.mp4)
 
 > **Disclaimer.** All customers, accounts, transactions, policies and decision rules in this
