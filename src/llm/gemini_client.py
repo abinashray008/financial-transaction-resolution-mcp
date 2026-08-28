@@ -10,7 +10,9 @@ only treated as authoritative when this server loaded it.
 from __future__ import annotations
 
 import logging
+import random
 import time
+from functools import lru_cache
 from typing import Any, Protocol
 
 from google import genai
@@ -23,6 +25,10 @@ from ..observability.tracing import TokenUsage, TracingService, track_llm
 from ..security.prompt_injection import looks_like_host_agent_hijack, wrap_untrusted
 
 logger = logging.getLogger(__name__)
+
+GEMINI_MAX_ATTEMPTS = 3
+GEMINI_RETRY_BASE_DELAY_SECONDS = 5.0
+GEMINI_RETRY_JITTER_SECONDS = 5.0
 
 SYSTEM_INSTRUCTIONS = """You are a careful card-transaction investigation assistant working over a
 fictional, synthetic dataset. You never file disputes, approve refunds, waive fees, or claim any
@@ -81,6 +87,23 @@ class SynthesisClient(Protocol):
         """Return the structured synthesis result."""
 
 
+@lru_cache(maxsize=4)
+def _build_genai_client(api_key: str) -> Any:
+    """Reuse the underlying Gemini client for a configured API key."""
+    return genai.Client(api_key=api_key)
+
+
+@lru_cache(maxsize=1)
+def _generation_config() -> types.GenerateContentConfig:
+    """Reuse the immutable generation options shared by every synthesis."""
+    return types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTIONS,
+        temperature=0.2,
+        response_mime_type="application/json",
+        response_schema=GeminiSynthesisResult,
+    )
+
+
 def build_synthesis_user_prompt(
     *,
     account_id: str,
@@ -131,7 +154,7 @@ class GeminiSynthesisClient:
                 raise SynthesisUnavailableError(
                     "GEMINI_API_KEY is not configured. Set it in the environment or a local .env file.",
                 )
-            client = genai.Client(api_key=api_key.strip())
+            client = _build_genai_client(api_key.strip())
         self._model = model
         self._tracing = tracing
         self._client = tracing.wrap_genai_client(client) if tracing is not None else client
@@ -153,26 +176,40 @@ class GeminiSynthesisClient:
             trusted_policy=trusted_policy,
         )
         started = time.perf_counter()
-        try:
-            response = self._client.models.generate_content(
-                model=self._model,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTIONS,
-                    temperature=0.2,
-                    response_mime_type="application/json",
-                    response_schema=GeminiSynthesisResult,
-                ),
-            )
-        except Exception as error:
-            logger.exception("Gemini synthesis failed")
-            raise SynthesisUnavailableError(
-                "The synthesis model could not complete the request. Retry later or check the API key.",
-            ) from error
+        response = self._generate_with_retry(user_prompt)
         duration_ms = int((time.perf_counter() - started) * 1000)
 
         self._record_usage(response, duration_ms=duration_ms)
         return parse_synthesis_result(response)
+
+    def _generate_with_retry(self, user_prompt: str) -> object:
+        """Call Gemini up to three times with exponential delay and jitter."""
+        config = _generation_config()
+        for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+            try:
+                return self._client.models.generate_content(
+                    model=self._model,
+                    contents=user_prompt,
+                    config=config,
+                )
+            except Exception as error:
+                if attempt == GEMINI_MAX_ATTEMPTS:
+                    logger.exception("Gemini synthesis failed after %d attempts", attempt)
+                    raise SynthesisUnavailableError(
+                        "The synthesis model could not complete the request after 3 attempts. "
+                        "Retry later or check the API key.",
+                    ) from error
+                delay = GEMINI_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+                delay += random.uniform(0, GEMINI_RETRY_JITTER_SECONDS)
+                logger.warning(
+                    "Gemini synthesis attempt %d/%d failed; retrying in %.2f seconds",
+                    attempt,
+                    GEMINI_MAX_ATTEMPTS,
+                    delay,
+                )
+                time.sleep(delay)
+
+        raise AssertionError("Gemini retry loop exhausted without returning or raising")
 
     def _record_usage(self, response: object, *, duration_ms: int) -> None:
         if self._tracing is None:

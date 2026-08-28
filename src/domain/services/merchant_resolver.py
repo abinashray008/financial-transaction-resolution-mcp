@@ -9,6 +9,7 @@ descriptor always resolves to the same merchant with the same confidence.
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 from ..enums import Confidence
 from ..models import Merchant
@@ -84,6 +85,7 @@ class MerchantMatch:
     explanation: str
 
 
+@lru_cache(maxsize=1024)
 def normalize_descriptor(descriptor: str) -> NormalizedDescriptor:
     """Reduce a raw descriptor to upper-case identifying tokens."""
     raw_tokens = [token for token in _SEPARATORS.split(descriptor.upper()) if token]

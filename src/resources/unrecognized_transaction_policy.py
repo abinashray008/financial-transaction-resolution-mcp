@@ -4,6 +4,7 @@ Fictional dispute guidance for charges a cardholder does not recognise. Not a
 real issuer policy and not affiliated with any financial institution.
 """
 
+from functools import lru_cache
 from typing import Any
 
 POLICY_URI = "policy://disputes/unrecognized-transaction"
@@ -14,6 +15,7 @@ DISCLAIMER = (
 )
 
 
+@lru_cache(maxsize=1)
 def get_unrecognized_transaction_policy() -> dict[str, Any]:
     """Return the unrecognized-transaction dispute policy payload."""
     return {

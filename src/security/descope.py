@@ -9,6 +9,7 @@ validation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from urllib.parse import urlparse
 
 from fastmcp.server.auth.providers.descope import DescopeProvider
@@ -31,6 +32,7 @@ class DescopeConnection:
     descope_base_url: str | None
 
 
+@lru_cache(maxsize=32)
 def issuer_from_config_url(config_url: str) -> str:
     """Strip the OpenID well-known suffix so clients get the authorization-server issuer."""
     candidate = config_url.strip()
@@ -39,6 +41,7 @@ def issuer_from_config_url(config_url: str) -> str:
     return candidate
 
 
+@lru_cache(maxsize=32)
 def parse_descope_config_url(config_url: str) -> DescopeConnection:
     """Accept either Descope well-known URL shape FastMCP documents.
 
@@ -91,11 +94,9 @@ def parse_descope_config_url(config_url: str) -> DescopeConnection:
     )
 
 
-def build_descope_provider(app_settings: Settings | None = None) -> DescopeProvider:
-    """Build a ``DescopeProvider`` from settings. Does not contact Descope."""
-    cfg = app_settings or settings
-    connection = parse_descope_config_url(cfg.descope_config_url)
-    base_url = cfg.base_url.strip() or "http://127.0.0.1:8000"
+@lru_cache(maxsize=16)
+def _build_descope_provider(config_url: str, base_url: str) -> DescopeProvider:
+    connection = parse_descope_config_url(config_url)
     if connection.config_url is not None:
         return DescopeProvider(config_url=connection.config_url, base_url=base_url)
     return DescopeProvider(
@@ -103,6 +104,13 @@ def build_descope_provider(app_settings: Settings | None = None) -> DescopeProvi
         descope_base_url=connection.descope_base_url,
         base_url=base_url,
     )
+
+
+def build_descope_provider(app_settings: Settings | None = None) -> DescopeProvider:
+    """Build a cached ``DescopeProvider`` from settings without contacting Descope."""
+    cfg = app_settings or settings
+    base_url = cfg.base_url.strip() or "http://127.0.0.1:8000"
+    return _build_descope_provider(cfg.descope_config_url.strip(), base_url)
 
 
 def resolve_runtime_auth(*, transport: str, app_settings: Settings | None = None) -> DescopeProvider | None:

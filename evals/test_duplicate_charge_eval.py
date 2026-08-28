@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
 
@@ -106,6 +107,7 @@ class DuplicateChargeScenario(TypedDict):
 _SCENARIO_ADAPTER = TypeAdapter(DuplicateChargeScenario)
 
 
+@lru_cache(maxsize=1)
 def load_scenario() -> DuplicateChargeScenario:
     path = Path(__file__).parent / "datasets" / "duplicate_charge.json"
     return _SCENARIO_ADAPTER.validate_json(path.read_text())
