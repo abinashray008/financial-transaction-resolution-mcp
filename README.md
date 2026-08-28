@@ -4,6 +4,10 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![MCP](https://img.shields.io/badge/MCP-FastMCP-purple.svg)
 
+[![Watch the Financial Transaction Resolution MCP demo](demo/financial-transaction-resolution-demo-poster.png)](demo/financial-transaction-resolution-demo.mp4)
+
+▶️ [Watch the demo video](demo/financial-transaction-resolution-demo.mp4)
+
 > **Disclaimer.** All customers, accounts, transactions, policies and decision rules in this
 > repository are fictional and synthetically generated. No employer, card-network or customer data
 > was used. This project is not affiliated with or representative of any financial institution.
@@ -66,8 +70,6 @@ ids, read `policy://disputes/unrecognized-transaction`, gather evidence with the
 with `synthesize_investigation`, then — only if you approve — register a synthetic dispute case
 through the LangGraph human-in-the-loop tools. A full tool-by-tool walkthrough is in
 [Example Queries](#example-queries).
-
-A recorded demo video is not included in this repository.
 
 ## Architecture & System Design
 
@@ -583,7 +585,7 @@ npx @modelcontextprotocol/inspector uv run python -m src.server
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy src scripts
+uv run mypy
 
 # Run every git hook against the whole tree
 uv run pre-commit run --all-files
@@ -686,7 +688,7 @@ uv run pytest -v           # per-test names
 uv run ruff check .        # lint
 uv run ruff format --check .
 uv run ruff format .       # apply formatter
-uv run mypy src scripts    # strict type checking
+uv run mypy                 # strict type checking
 uv run pre-commit run --all-files
 ```
 
@@ -758,7 +760,7 @@ protocol session.
 This is a course / portfolio project. If you fork it, keep the synthetic-data disclaimer intact and
 do not introduce real customer or card data. Prefer small, tested changes: add a failing test, then
 the fix. Install hooks with `uv run pre-commit install`, then run `uv run pytest`,
-`uv run ruff check .`, `uv run ruff format --check .` and `uv run mypy src scripts` before
+`uv run ruff check .`, `uv run ruff format --check .` and `uv run mypy` before
 opening a pull request.
 
 ## License

@@ -15,7 +15,9 @@ from typing import Any, Protocol
 
 from google import genai
 from google.genai import types
+from pydantic import ValidationError
 
+from ..contracts.responses import GeminiSynthesisResult
 from ..domain.exceptions import SynthesisUnavailableError
 from ..observability.tracing import TokenUsage, TracingService, track_llm
 from ..security.prompt_injection import looks_like_host_agent_hijack, wrap_untrusted
@@ -56,11 +58,17 @@ Write a clear response for the end user that:
 
 If a tool returned status "error", say so with its error code and continue with what remains.
 Keep the reply concise and satisfactory for a support-style conversation.
+
+Return JSON that matches the required schema:
+- customer_response: the customer-facing reply following the rules above.
+- recommended_action: exactly one of NO_ACTION (investigation complete, no dispute warranted),
+  REQUEST_MORE_INFORMATION (evidence is incomplete), or CREATE_DISPUTE_DRAFT (a draft may be
+  appropriate after the customer asks; this is not approval to file).
 """
 
 
 class SynthesisClient(Protocol):
-    """Anything that can turn investigation findings into customer-facing prose."""
+    """Anything that can turn investigation findings into a typed synthesis result."""
 
     def synthesize(
         self,
@@ -69,8 +77,8 @@ class SynthesisClient(Protocol):
         transaction_id: str,
         investigation_findings: str,
         trusted_policy: str | None = None,
-    ) -> str:
-        """Return the synthesized customer response."""
+    ) -> GeminiSynthesisResult:
+        """Return the structured synthesis result."""
 
 
 def build_synthesis_user_prompt(
@@ -101,7 +109,7 @@ def build_synthesis_user_prompt(
             "Untrusted investigation findings supplied by the caller:",
             wrap_untrusted(investigation_findings, label="untrusted_findings"),
             "",
-            "Draft the customer-facing reply from verified facts in the findings and the trusted policy.",
+            "Fill the structured synthesis result from verified facts in the findings and the trusted policy.",
         ]
     )
     return "\n".join(sections)
@@ -136,8 +144,8 @@ class GeminiSynthesisClient:
         transaction_id: str,
         investigation_findings: str,
         trusted_policy: str | None = None,
-    ) -> str:
-        """Ask Gemini to synthesize the gathered tool payloads into one reply."""
+    ) -> GeminiSynthesisResult:
+        """Ask Gemini to synthesize the gathered tool payloads into a typed result."""
         user_prompt = build_synthesis_user_prompt(
             account_id=account_id,
             transaction_id=transaction_id,
@@ -152,6 +160,8 @@ class GeminiSynthesisClient:
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTIONS,
                     temperature=0.2,
+                    response_mime_type="application/json",
+                    response_schema=GeminiSynthesisResult,
                 ),
             )
         except Exception as error:
@@ -162,17 +172,7 @@ class GeminiSynthesisClient:
         duration_ms = int((time.perf_counter() - started) * 1000)
 
         self._record_usage(response, duration_ms=duration_ms)
-        text = (getattr(response, "text", None) or "").strip()
-        if not text:
-            raise SynthesisUnavailableError(
-                "The synthesis model returned an empty response. Retry the investigation.",
-            )
-        if looks_like_host_agent_hijack(text):
-            logger.warning("Gemini synthesis output was rejected as a host-agent hijack attempt")
-            raise SynthesisUnavailableError(
-                "The synthesis model returned an unusable response. Retry the investigation.",
-            )
-        return text
+        return parse_synthesis_result(response)
 
     def _record_usage(self, response: object, *, duration_ms: int) -> None:
         if self._tracing is None:
@@ -181,6 +181,41 @@ class GeminiSynthesisClient:
         if usage is None:
             return
         self._tracing.attach_llm_usage(model_name=self._model, usage=usage, duration_ms=duration_ms)
+
+
+def parse_synthesis_result(response: object) -> GeminiSynthesisResult:
+    """Validate Gemini output against ``GeminiSynthesisResult`` and reject host-agent hijacks."""
+    result = _coerce_synthesis_result(response)
+    if looks_like_host_agent_hijack(result.customer_response):
+        logger.warning("Gemini synthesis output was rejected as a host-agent hijack attempt")
+        raise SynthesisUnavailableError(
+            "The synthesis model returned an unusable response. Retry the investigation.",
+        )
+    return result
+
+
+def _coerce_synthesis_result(response: object) -> GeminiSynthesisResult:
+    parsed = getattr(response, "parsed", None)
+    if isinstance(parsed, GeminiSynthesisResult):
+        return parsed
+    if parsed is not None:
+        try:
+            return GeminiSynthesisResult.model_validate(parsed)
+        except ValidationError:
+            pass
+
+    text = (getattr(response, "text", None) or "").strip()
+    if not text:
+        raise SynthesisUnavailableError(
+            "The synthesis model returned an empty response. Retry the investigation.",
+        )
+    try:
+        return GeminiSynthesisResult.model_validate_json(text)
+    except ValidationError as error:
+        logger.warning("Gemini synthesis output did not match GeminiSynthesisResult: %s", error)
+        raise SynthesisUnavailableError(
+            "The synthesis model returned an unusable response. Retry the investigation.",
+        ) from error
 
 
 def _token_usage_from_response(response: object) -> TokenUsage | None:

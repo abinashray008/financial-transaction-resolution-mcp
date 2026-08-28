@@ -1,22 +1,43 @@
 """Unit tests for Gemini synthesis wiring."""
 
 import json
+from types import SimpleNamespace
+from typing import Literal
 
 import pytest
+from pydantic import ValidationError
 
 from src.app.container import Container, build_container_from_engine
 from src.config.settings import settings
 from src.contracts.requests import SynthesizeInvestigationRequest
-from src.domain.exceptions import ErrorCode
+from src.contracts.responses import GeminiSynthesisResult
+from src.domain.exceptions import ErrorCode, SynthesisUnavailableError
+from src.llm.gemini_client import parse_synthesis_result
 from src.tools.synthesize_investigation_tool import synthesize_investigation
 from tests.conftest import SCENARIO_ACCOUNT, assert_error, assert_ok
+
+
+def canned_synthesis_result(
+    customer_response: str,
+    *,
+    recommended_action: Literal[
+        "NO_ACTION",
+        "REQUEST_MORE_INFORMATION",
+        "CREATE_DISPUTE_DRAFT",
+    ] = "CREATE_DISPUTE_DRAFT",
+) -> GeminiSynthesisResult:
+    """Deterministic structured reply used by fake Gemini clients."""
+    return GeminiSynthesisResult(
+        customer_response=customer_response,
+        recommended_action=recommended_action,
+    )
 
 
 class FakeSynthesisClient:
     """Deterministic stand-in for Gemini."""
 
     def __init__(self) -> None:
-        self.calls: list[dict[str, str]] = []
+        self.calls: list[dict[str, str | None]] = []
 
     def synthesize(
         self,
@@ -25,7 +46,7 @@ class FakeSynthesisClient:
         transaction_id: str,
         investigation_findings: str,
         trusted_policy: str | None = None,
-    ) -> str:
+    ) -> GeminiSynthesisResult:
         self.calls.append(
             {
                 "account_id": account_id,
@@ -34,7 +55,7 @@ class FakeSynthesisClient:
                 "trusted_policy": trusted_policy,
             }
         )
-        return (
+        return canned_synthesis_result(
             "Verified facts: the tools show a likely duplicate of TXN-SCN-DUP-A.\n"
             "Inferences: the charge may have posted twice.\n"
             "Next step: a specialist should review the audit trail."
@@ -73,6 +94,7 @@ def test_synthesize_investigation_uses_injected_client(synthesis_container):
     assert response.data is not None
     assert "likely duplicate" in response.data.customer_response
     assert response.data.model_name == settings.gemini_model
+    assert response.data.recommended_action == "CREATE_DISPUTE_DRAFT"
     assert len(fake.calls) == 1
     assert fake.calls[0]["account_id"] == SCENARIO_ACCOUNT
     assert fake.calls[0]["transaction_id"] == "TXN-SCN-DUP-A"
@@ -127,7 +149,8 @@ def test_synthesize_investigation_rejects_invalid_json(synthesis_container):
     assert_error(response, ErrorCode.INVALID_INPUT)
 
 
-def test_synthesize_investigation_requires_api_key_without_client(engine):
+def test_synthesize_investigation_requires_api_key_without_client(engine, monkeypatch):
+    monkeypatch.setattr(settings, "gemini_api_key", "")
     container = build_container_from_engine(engine, synthesis=None)
     findings = json.dumps({"get_account_summary": {"status": "ok"}})
 
@@ -141,3 +164,24 @@ def test_synthesize_investigation_requires_api_key_without_client(engine):
     )
 
     assert_error(response, ErrorCode.SYNTHESIS_UNAVAILABLE)
+
+
+def test_synthesis_result_rejects_unknown_recommended_action():
+    with pytest.raises(ValidationError):
+        GeminiSynthesisResult.model_validate(
+            {
+                "customer_response": "ok",
+                "recommended_action": "FILE_NOW",
+            }
+        )
+
+
+def test_parse_synthesis_result_accepts_json_text():
+    result = canned_synthesis_result("The charge is a likely duplicate.")
+    parsed = parse_synthesis_result(SimpleNamespace(text=result.model_dump_json(), parsed=None))
+    assert parsed == result
+
+
+def test_parse_synthesis_result_rejects_incomplete_payload():
+    with pytest.raises(SynthesisUnavailableError):
+        parse_synthesis_result(SimpleNamespace(text='{"customer_response":"ok"}', parsed=None))

@@ -221,7 +221,7 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
         ],
         request_id: RequestId = None,
     ) -> SynthesisResponse:
-        """Synthesize the gathered investigation tool responses into a clear customer-facing reply
+        """Synthesize the gathered investigation tool responses into a typed customer-facing reply
         using Gemini. Call this only after the read-only evidence tools have been used. Does not
         file disputes or change any account data.
         """

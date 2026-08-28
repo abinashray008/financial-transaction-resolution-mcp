@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from src.app.container import build_container_from_engine
 from src.config.settings import Settings
 from src.contracts.requests import GetAccountSummaryRequest, SynthesizeInvestigationRequest
+from src.contracts.responses import GeminiSynthesisResult
 from src.llm.gemini_client import GeminiSynthesisClient, _token_usage_from_response
 from src.observability.tracing import (
     TokenUsage,
@@ -19,7 +20,7 @@ from src.security.masking import mask_account_id, mask_customer_id
 from src.tools.get_account_summary_tool import get_account_summary
 from src.tools.synthesize_investigation_tool import synthesize_investigation
 from tests.conftest import SCENARIO_ACCOUNT, assert_ok
-from tests.test_synthesis import FakeSynthesisClient
+from tests.test_synthesis import FakeSynthesisClient, canned_synthesis_result
 
 
 class RecordingSink:
@@ -127,11 +128,15 @@ def test_token_usage_is_parsed_from_gemini_metadata():
 def test_gemini_client_attaches_usage_to_open_span():
     sink = RecordingSink()
     tracing = TracingService(enabled=False, project_name="test", sink=sink)
+    result = canned_synthesis_result("Synthesized reply.", recommended_action="NO_ACTION")
+    captured: dict = {}
 
     class FakeModels:
         def generate_content(self, **kwargs):
+            captured.update(kwargs)
             return SimpleNamespace(
-                text="Synthesized reply.",
+                text=result.model_dump_json(),
+                parsed=result,
                 usage_metadata=SimpleNamespace(
                     prompt_token_count=10,
                     candidates_token_count=5,
@@ -143,13 +148,15 @@ def test_gemini_client_attaches_usage_to_open_span():
     client._client = SimpleNamespace(models=FakeModels())
 
     with tracing.tool_span(tool_name="synthesize_investigation", request_id="inv-tokens", account_id=SCENARIO_ACCOUNT):
-        text = client.synthesize(
+        synthesized = client.synthesize(
             account_id=SCENARIO_ACCOUNT,
             transaction_id="TXN-SCN-DUP-A",
             investigation_findings="{}",
         )
 
-    assert text == "Synthesized reply."
+    assert synthesized == result
+    assert captured["config"].response_mime_type == "application/json"
+    assert captured["config"].response_schema is GeminiSynthesisResult
     assert sink.events[0].usage == TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
     assert sink.events[0].model_name == "gemini-2.5-pro"
     assert sink.events[0].account_id_masked == mask_account_id(SCENARIO_ACCOUNT)
