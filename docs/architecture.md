@@ -1,7 +1,9 @@
 # Architecture
 
 How the server is put together and why. For what it does, see the
-[README](../README.md).
+[README](../README.md). Related detail: [data model](data-model.md),
+[security](security.md), [investigation workflow](investigation-workflow.md),
+[observability](observability.md).
 
 > All data described here is fictional and synthetically generated. This project is not affiliated
 > with or representative of any financial institution.
@@ -22,6 +24,59 @@ Dependencies point inward. Nothing in `domain/` imports from `contracts/`, `repo
 | Domain | `src/domain/` | Models, validated criteria, analysis services, error taxonomy. | Nothing else in the project |
 | Persistence | `src/repositories/` | SQLAlchemy tables, sessions, account-scoped queries, row mapping. | Domain |
 | Cross-cutting | `src/security/`, `src/audit/`, `src/observability/`, `src/utils/`, `src/config/` | Masking, Descope HTTP auth, verified reviewer identity, audit writes, Opik traces, logging, settings. | Domain, repositories |
+
+## Project structure
+
+### Server and registration
+
+- `src/server.py` — FastMCP instance, instructions, stdio and Descope-authenticated HTTP.
+- `src/routers/tools.py` — Eight tools. Evidence tools and synthesis use `readOnlyHint`;
+  `confirm_unrecognized_transaction` is the write and requires a server-issued `confirmation_token`.
+- `src/routers/prompts.py` — `investigate_transaction`.
+- `src/routers/resources.py` — `status://server` and three policy URIs.
+- `src/routers/reviews.py` — Human review application: display a persisted case and record
+  APPROVE/REJECT against the existing row.
+
+### MCP capabilities
+
+- `src/tools/` — One handler per tool (`get_account_summary`, `search_transactions`,
+  `get_transaction_details`, `resolve_merchant`, `check_duplicate_charge`, `get_audit_trace`,
+  `synthesize_investigation`, `confirm_unrecognized_transaction`).
+- `src/workflows/dispute_case.py` — LangGraph graph: checkpoint the already-written PENDING_REVIEW
+  case, interrupt for back-office review, resume after the case row is updated. SQLite-checkpointed
+  so pending reviews survive restarts (PostgreSQL in production).
+- `src/workflows/checkpointer.py` — Demo `SqliteSaver` factory. Production should use `PostgresSaver`.
+- `src/prompts/investigate_transaction_prompt.py` — Agentic workflow text, including the ask-the-caller
+  gate and the post-synthesis confirmation phase.
+- `src/resources/` — Server status plus unrecognized-transaction, foreign-transaction-fee and
+  late-payment-fee policies.
+
+### Domain, persistence and contracts
+
+- `src/domain/` — Frozen models, search criteria, merchant resolver, duplicate-charge service,
+  money conversion, error taxonomy.
+- `src/repositories/` — SQLAlchemy tables, account-scoped queries, row mappers, session factory.
+- `src/contracts/` — Pydantic request/response models and the shared `{status, request_id, data, error}`
+  envelope.
+
+### Cross-cutting
+
+- `src/app/container.py`, `execution.py`, `presenters.py`, `validators.py`, `data_seed.py`
+- `src/security/masking.py` — Account and card masking.
+- `src/security/descope.py` — Descope well-known URL parsing and `DescopeProvider` construction.
+- `src/security/reviewer.py` — Review-route auth: verified JWT identity, or explicit `local-demo`.
+- `src/audit/service.py` — Append-only sanitized audit events.
+- `src/observability/tracing.py` — Optional Opik traces, Gemini token usage and latency, HITL graph.
+- `src/llm/gemini_client.py` — The only module that calls a model.
+- `src/config/settings.py` — Environment-backed settings.
+
+### Data, tests and docs
+
+- `scripts/generate_data.py` — Regenerates `data/transactions.db`. Dataset notes: [dataset.md](dataset.md).
+- `tests/` — Handler, isolation, data-reproducibility, protocol and synthesis tests.
+- `evals/` — Deterministic and live Gemini scorecards. See [evals/README.md](../evals/README.md).
+
+Tool parameters: [tools.md](tools.md).
 
 ## Request lifecycle
 
@@ -66,14 +121,9 @@ present". That has three consequences worth the indirection:
 ## Agent observability
 
 `src/observability/tracing.py` exports investigation traces to [Opik](https://www.comet.com/docs/opik/)
-when `OPIK_API_KEY` is set (Opik Cloud) or `OPIK_USE_LOCAL=true` (self-hosted). Each MCP tool call
-becomes a span tagged with the investigation `request_id` as `thread_id`, so a full
-`investigate_transaction` loop is one thread in the Opik UI. Gemini synthesis is decorated with
-`@track(type="llm")` and the client is wrapped with `track_genai`, which records token usage,
-estimated cost, and LLM call latency (`llm_duration_ms`). The LangGraph HITL dispute workflow is
-decorated with `@track` on propose/resume and wrapped with `track_langgraph`; node payloads are
-redacted before they leave the process. Span payloads are sanitized: tool name, request id, masked
-account id, outcome, duration and token counts — never descriptors, names or transaction bodies.
+when `OPIK_API_KEY` is set (Opik Cloud) or `OPIK_USE_LOCAL=true` (self-hosted). Setup, span contents
+and sanitization are in [observability.md](observability.md). Opik online binary evaluation is
+planned, not implemented.
 
 ## Dependency injection
 
@@ -91,30 +141,11 @@ HTTP listener plus SQLite that is simple and safe; there is no ambient session t
 
 ## Data model
 
-| Table | Purpose | Notes |
-| --- | --- | --- |
-| `customers` | Fictional account holders | Names exist but no tool returns them |
-| `accounts` | Card accounts | `card_last_four` only; no PAN exists anywhere |
-| `merchants` | Merchant catalog | `descriptor_patterns` is a JSON array of billing fragments |
-| `transactions` | Card transactions | `amount_minor` is integer cents |
-| `audit_events` | Sanitized tool invocations | Written on every tool call |
-| `confirmation_challenges` | One-time customer confirmation tokens | Only the token digest is stored; bound to investigation, account and transaction |
-| `dispute_cases` | Internal synthetic case files | Written at `PENDING_REVIEW` on customer confirmation, then updated in place |
-| `dispute_evidence_snapshots` | Immutable evidence copy | Written in the same transaction as the case; never updated |
-| `dispute_lifecycle_events` | Semantic case lifecycle audit | Distinct from tool telemetry; includes actor type, status transition and hashes |
-
-LangGraph HITL checkpoints live in a **separate** SQLite file (`CHECKPOINT_PATH`, default
-`data/checkpoints.db`), not in these SQLAlchemy tables. That is the demo checkpointer
-(`SqliteSaver`). A production deployment should use PostgreSQL (`PostgresSaver` from
-`langgraph-checkpoint-postgres`) so paused threads can be shared across processes.
-
-The domain sees frozen dataclasses (`src/domain/models.py`), never ORM rows. `src/repositories/mappers.py`
-is the only translation point.
-
-**Amounts.** SQLite has no exact decimal type, and duplicate detection turns on exact amount
-equality, so storage uses integer minor units and `src/domain/money.py` converts at the boundary.
-`Decimal` is the only representation above the repository layer, and it serializes to JSON as a
-string.
+Tables, isolation rules and integer minor-unit amounts are documented in
+[data-model.md](data-model.md). The domain sees frozen dataclasses
+(`src/domain/models.py`), never ORM rows. `src/repositories/mappers.py` is the
+only translation point. LangGraph checkpoints live in a separate SQLite file
+(`CHECKPOINT_PATH`); production should use `PostgresSaver`.
 
 ## Deterministic analysis
 
@@ -167,6 +198,9 @@ or above. The first three rules are what keep the service from crying wolf on th
 subscription scenarios.
 
 ## Security boundaries
+
+Threat scenarios, Descope HTTP auth and reviewer JWT rules are in
+[security.md](security.md). The architectural constraints are:
 
 **Prompt injection is treated as untrusted data, not as instructions.** MCP prompt arguments are
 accepted only when they match identifier patterns; anything else is dropped rather than interpolated
