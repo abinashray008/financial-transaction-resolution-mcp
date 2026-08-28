@@ -12,7 +12,8 @@ from src.config.settings import settings
 from src.contracts.requests import SynthesizeInvestigationRequest
 from src.contracts.responses import GeminiSynthesisResult
 from src.domain.exceptions import ErrorCode, SynthesisUnavailableError
-from src.llm.gemini_client import parse_synthesis_result
+from src.llm import gemini_client
+from src.llm.gemini_client import GeminiSynthesisClient, parse_synthesis_result
 from src.tools.synthesize_investigation_tool import synthesize_investigation
 from tests.conftest import SCENARIO_ACCOUNT, assert_error, assert_ok
 
@@ -23,8 +24,8 @@ def canned_synthesis_result(
     recommended_action: Literal[
         "NO_ACTION",
         "REQUEST_MORE_INFORMATION",
-        "CREATE_DISPUTE_DRAFT",
-    ] = "CREATE_DISPUTE_DRAFT",
+        "REQUEST_CUSTOMER_CONFIRMATION",
+    ] = "REQUEST_CUSTOMER_CONFIRMATION",
 ) -> GeminiSynthesisResult:
     """Deterministic structured reply used by fake Gemini clients."""
     return GeminiSynthesisResult(
@@ -94,7 +95,11 @@ def test_synthesize_investigation_uses_injected_client(synthesis_container):
     assert response.data is not None
     assert "likely duplicate" in response.data.customer_response
     assert response.data.model_name == settings.gemini_model
-    assert response.data.recommended_action == "CREATE_DISPUTE_DRAFT"
+    assert response.data.recommended_action == "REQUEST_CUSTOMER_CONFIRMATION"
+    assert response.data.investigation_id == "inv-1"
+    assert response.data.confirmation is not None
+    assert response.data.confirmation.confirmation_token.startswith("cnf_")
+    assert response.data.confirmation.next_tool == "confirm_unrecognized_transaction"
     assert len(fake.calls) == 1
     assert fake.calls[0]["account_id"] == SCENARIO_ACCOUNT
     assert fake.calls[0]["transaction_id"] == "TXN-SCN-DUP-A"
@@ -185,3 +190,59 @@ def test_parse_synthesis_result_accepts_json_text():
 def test_parse_synthesis_result_rejects_incomplete_payload():
     with pytest.raises(SynthesisUnavailableError):
         parse_synthesis_result(SimpleNamespace(text='{"customer_response":"ok"}', parsed=None))
+
+
+def test_gemini_retries_twice_then_succeeds_with_exponential_jitter(monkeypatch):
+    result = canned_synthesis_result("The retry succeeded.", recommended_action="NO_ACTION")
+    sleeps: list[float] = []
+
+    class FlakyModels:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_content(self, **_kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("temporary Gemini failure")
+            return SimpleNamespace(parsed=result, text=result.model_dump_json())
+
+    models = FlakyModels()
+    monkeypatch.setattr(gemini_client.random, "uniform", lambda _low, _high: 1.5)
+    monkeypatch.setattr(gemini_client.time, "sleep", sleeps.append)
+    client = GeminiSynthesisClient(client=SimpleNamespace(models=models), model="gemini-test")
+
+    synthesized = client.synthesize(
+        account_id=SCENARIO_ACCOUNT,
+        transaction_id="TXN-SCN-DUP-A",
+        investigation_findings="{}",
+    )
+
+    assert synthesized == result
+    assert models.calls == 3
+    assert sleeps == [6.5, 11.5]
+
+
+def test_gemini_stops_after_three_failed_attempts(monkeypatch):
+    class FailingModels:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_content(self, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("persistent Gemini failure")
+
+    models = FailingModels()
+    sleeps: list[float] = []
+    monkeypatch.setattr(gemini_client.random, "uniform", lambda _low, _high: 0.0)
+    monkeypatch.setattr(gemini_client.time, "sleep", sleeps.append)
+    client = GeminiSynthesisClient(client=SimpleNamespace(models=models), model="gemini-test")
+
+    with pytest.raises(SynthesisUnavailableError, match="after 3 attempts"):
+        client.synthesize(
+            account_id=SCENARIO_ACCOUNT,
+            transaction_id="TXN-SCN-DUP-A",
+            investigation_findings="{}",
+        )
+
+    assert models.calls == 3
+    assert sleeps == [5.0, 10.0]

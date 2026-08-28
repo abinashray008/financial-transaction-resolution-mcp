@@ -15,20 +15,18 @@ from pydantic import Field
 from ..app.container import Container
 from ..contracts.requests import (
     CheckDuplicateChargeRequest,
-    CreateDisputeDraftRequest,
+    ConfirmUnrecognizedTransactionRequest,
     GetAccountSummaryRequest,
     GetAuditTraceRequest,
     GetTransactionDetailsRequest,
     ResolveMerchantRequest,
     SearchTransactionsRequest,
-    SubmitDisputeCaseRequest,
     SynthesizeInvestigationRequest,
 )
 from ..contracts.responses import (
     AccountSummaryResponse,
     AuditTraceResponse,
-    DisputeDecisionResponse,
-    DisputeDraftResponse,
+    DisputeCaseCreatedResponse,
     DuplicateCheckResponse,
     MerchantResolutionResponse,
     SynthesisResponse,
@@ -43,25 +41,25 @@ from ..domain.criteria import (
 )
 from ..domain.enums import TransactionStatus
 from ..tools.check_duplicate_charge_tool import check_duplicate_charge as check_duplicate_charge_handler
-from ..tools.create_dispute_draft_tool import create_dispute_draft as create_dispute_draft_handler
+from ..tools.confirm_unrecognized_transaction_tool import (
+    confirm_unrecognized_transaction as confirm_unrecognized_transaction_handler,
+)
 from ..tools.get_account_summary_tool import get_account_summary as get_account_summary_handler
 from ..tools.get_audit_trace_tool import get_audit_trace as get_audit_trace_handler
 from ..tools.get_transaction_details_tool import get_transaction_details as get_transaction_details_handler
 from ..tools.resolve_merchant_tool import resolve_merchant as resolve_merchant_handler
 from ..tools.search_transactions_tool import search_transactions as search_transactions_handler
-from ..tools.submit_dispute_case_tool import submit_dispute_case as submit_dispute_case_handler
 from ..tools.synthesize_investigation_tool import (
     synthesize_investigation as synthesize_investigation_handler,
 )
 
 # Evidence tools read only from the local synthetic dataset. Synthesis calls Gemini.
-# Dispute registration writes only after an explicit human approval.
+# Confirmation writes an internal PENDING_REVIEW case after a server-issued token.
 READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
 SYNTHESIS = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True)
-DISPUTE_PROPOSE = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
-DISPUTE_WRITE = ToolAnnotations(
+DISPUTE_CONFIRM = ToolAnnotations(
     readOnlyHint=False,
-    idempotentHint=False,
+    idempotentHint=True,
     destructiveHint=False,
     openWorldHint=False,
 )
@@ -222,8 +220,9 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
         request_id: RequestId = None,
     ) -> SynthesisResponse:
         """Synthesize the gathered investigation tool responses into a typed customer-facing reply
-        using Gemini. Call this only after the read-only evidence tools have been used. Does not
-        file disputes or change any account data.
+        using Gemini. Call this only after the read-only evidence tools have been used. When the
+        charge is eligible, the response includes a one-time confirmation_token. Does not file
+        disputes or change any account data.
         """
         return synthesize_investigation_handler(
             container,
@@ -235,65 +234,44 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
             ),
         )
 
-    @mcp.tool(annotations=DISPUTE_PROPOSE)
-    def create_dispute_draft(
+    @mcp.tool(annotations=DISPUTE_CONFIRM)
+    def confirm_unrecognized_transaction(
+        investigation_id: Annotated[
+            str,
+            Field(description="Correlation id of the investigation, returned by synthesize_investigation."),
+        ],
         account_id: AccountId,
         transaction_id: TransactionId,
-        investigation_findings: Annotated[
+        confirmation_token: Annotated[
             str,
             Field(
                 description=(
-                    "JSON object collecting the earlier tool envelopes. Required so a dispute "
-                    "draft cannot be created without an investigation."
+                    "One-time token issued by synthesize_investigation. Present it only after the "
+                    "customer has explicitly confirmed they do not recognize the charge."
                 ),
             ),
         ],
-        synthesis_summary: Annotated[
+        idempotency_key: Annotated[
             str,
             Field(
-                description=("Customer-facing reply from synthesize_investigation that the draft is based on."),
+                description=(
+                    "Caller-chosen retry key. Repeating a confirmation with the same key returns the same case."
+                ),
             ),
         ],
-        request_id: RequestId = None,
-    ) -> DisputeDraftResponse:
-        """Create a PENDING_REVIEW dispute draft with identifiers, reason code, verified and
-        missing evidence, applied policy, proposed action, and a draft hash. Does not require
-        approval and does not write a dispute case. Call this only after synthesize_investigation.
-        Present the draft and its review_path so a human can record a decision and mint approval_id.
+    ) -> DisputeCaseCreatedResponse:
+        """Create an internal PENDING_REVIEW dispute case after the customer confirms they do not
+        recognize the charge. The server verifies confirmation_token; it does not accept an LLM
+        approval flag. Returns the case_id and a 10-business-day investigation message. The case is
+        queued for authenticated back-office review and is not submitted to an issuer.
         """
-        return create_dispute_draft_handler(
+        return confirm_unrecognized_transaction_handler(
             container,
-            CreateDisputeDraftRequest(
+            ConfirmUnrecognizedTransactionRequest(
+                investigation_id=investigation_id,
                 account_id=account_id,
                 transaction_id=transaction_id,
-                investigation_findings=investigation_findings,
-                synthesis_summary=synthesis_summary,
-                request_id=request_id,
+                confirmation_token=confirmation_token,
+                idempotency_key=idempotency_key,
             ),
-        )
-
-    @mcp.tool(annotations=DISPUTE_WRITE)
-    def submit_dispute_case(
-        request_id: Annotated[
-            str,
-            Field(description="The same correlation id used for create_dispute_draft and the investigation."),
-        ],
-        approval_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "One-time id minted by the human review application after an authenticated "
-                    "reviewer decision. approved=true is not accepted."
-                ),
-            ),
-        ],
-    ) -> DisputeDecisionResponse:
-        """Create a synthetic dispute case after a verified one-time approval_id. The MCP
-        server checks the approval record (request_id, draft hash, expiry, unused) before
-        writing. A boolean approved flag is not sufficient proof. Declining leaves
-        dispute_cases unchanged. This is a synthetic case file, not an issuer ruling.
-        """
-        return submit_dispute_case_handler(
-            container,
-            SubmitDisputeCaseRequest(request_id=request_id, approval_id=approval_id),
         )

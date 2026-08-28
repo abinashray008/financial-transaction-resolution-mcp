@@ -35,6 +35,8 @@ _WORKFLOW_REDACT_KEYS = frozenset(
         "merchant_display_name",
         "reason",
         "decision_note",
+        "review_note",
+        "note",
     }
 )
 _configured = False

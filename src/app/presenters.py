@@ -6,24 +6,38 @@ an unmasked identifier.
 
 from ..contracts.responses import (
     AccountSummaryData,
-    ApprovalRecordData,
     AuditEventView,
-    DisputeDecisionData,
-    DisputeDraftData,
+    ConfirmationChallengeData,
+    DisputeCaseCreated,
+    DisputeCaseView,
+    DisputeLifecycleEventView,
     MerchantData,
+    ReviewDecisionData,
     TransactionSummary,
 )
-from ..domain.enums import DisputeWorkflowStatus
 from ..domain.models import (
     AccountWithCustomerState,
     AuditEvent,
-    DisputeApproval,
-    DisputeDecision,
-    DisputeProposal,
+    CustomerConfirmation,
+    DisputeCase,
+    DisputeEvidenceSnapshot,
+    DisputeLifecycleAuditEvent,
     Merchant,
     TransactionWithMerchant,
 )
 from ..security.masking import mask_account_id, mask_card, mask_customer_id
+
+CASE_CREATED_MESSAGE = "We will investigate the case and get back in 10 business days."
+CONFIRMATION_PROMPT_MESSAGE = (
+    "Show the customer-facing reply, then ask the customer to confirm in their own words that they "
+    "do not recognize this charge. Only if they confirm, call confirm_unrecognized_transaction with "
+    "this confirmation_token. Do not confirm on the customer's behalf."
+)
+
+
+def review_path(case_id: str) -> str:
+    """HTTP path where an authenticated reviewer decides one case."""
+    return f"/reviews/{case_id}"
 
 
 def to_account_summary(record: AccountWithCustomerState) -> AccountSummaryData:
@@ -80,55 +94,104 @@ def to_audit_event_view(event: AuditEvent) -> AuditEventView:
     )
 
 
-def to_dispute_draft(proposal: DisputeProposal) -> DisputeDraftData:
-    """Present a PENDING_REVIEW draft without customer names or unmasked ids."""
-    return DisputeDraftData(
-        status=DisputeWorkflowStatus.PENDING_REVIEW,
-        masked_account_id=mask_account_id(proposal.account_id),
-        masked_customer_id=mask_customer_id(proposal.customer_id),
-        transaction_id=proposal.transaction_id,
-        merchant_display_name=proposal.merchant_display_name,
-        amount=proposal.amount,
-        currency=proposal.currency,
-        transaction_date=proposal.transaction_date,
-        reason=proposal.reason,
-        reason_code=proposal.reason_code,
-        verified_evidence=list(proposal.verified_evidence),
-        missing_evidence=list(proposal.missing_evidence),
-        applied_policy=proposal.applied_policy,
-        proposed_action=proposal.proposed_action,
-        draft_hash=proposal.draft_hash,
-        review_path=f"/reviews/{proposal.request_id}",
-        message=proposal.message,
+def to_confirmation_challenge(
+    confirmation: CustomerConfirmation,
+    *,
+    confirmation_token: str,
+) -> ConfirmationChallengeData:
+    """Present the one-time confirmation gate issued after eligible synthesis."""
+    return ConfirmationChallengeData(
+        confirmation_token=confirmation_token,
+        expires_at=confirmation.expires_at,
+        masked_account_id=mask_account_id(confirmation.account_id),
+        transaction_id=confirmation.transaction_id,
+        message=CONFIRMATION_PROMPT_MESSAGE,
     )
 
 
-def to_dispute_decision(decision: DisputeDecision) -> DisputeDecisionData:
-    """Present the outcome of a verified approve or decline decision."""
-    return DisputeDecisionData(
-        workflow_status=DisputeWorkflowStatus(decision.workflow_status),
-        masked_account_id=mask_account_id(decision.account_id),
-        masked_customer_id=mask_customer_id(decision.customer_id),
-        transaction_id=decision.transaction_id,
-        case_id=decision.case_id,
-        reason=decision.reason,
-        decision_note=decision.decision_note,
-        approval_id=decision.approval_id,
-        registered=decision.case_id is not None,
+def to_dispute_case_created(case: DisputeCase) -> DisputeCaseCreated:
+    """Present a newly persisted PENDING_REVIEW case to the host agent."""
+    return DisputeCaseCreated(
+        case_id=case.case_id,
+        status="PENDING_REVIEW",
+        created_at=case.created_at,
+        investigation_id=case.investigation_id,
+        masked_account_id=mask_account_id(case.account_id),
+        masked_customer_id=mask_customer_id(case.customer_id),
+        transaction_id=case.transaction_id,
+        reason_code=case.reason_code,
+        version=case.version,
+        evidence_hash=case.evidence_hash,
+        review_path=review_path(case.case_id),
+        message=CASE_CREATED_MESSAGE,
     )
 
 
-def to_approval_record(record: DisputeApproval) -> ApprovalRecordData:
-    """Present a minted approval record to the human review application."""
-    return ApprovalRecordData(
-        approval_id=record.approval_id,
-        request_id=record.request_id,
-        draft_hash=record.draft_hash,
-        reviewer_id=record.reviewer_id,
-        decision=record.decision,
-        decision_note=record.decision_note,
-        created_at=record.created_at,
-        decided_at=record.decided_at,
-        expires_at=record.expires_at,
-        consumed_at=record.consumed_at,
+def to_lifecycle_event_view(event: DisputeLifecycleAuditEvent) -> DisputeLifecycleEventView:
+    """Present one already-sanitized lifecycle event."""
+    return DisputeLifecycleEventView(
+        event_id=event.event_id,
+        event_type=event.event_type,
+        case_id=event.case_id,
+        investigation_id=event.investigation_id,
+        correlation_id=event.correlation_id,
+        timestamp=event.timestamp,
+        actor_type=event.actor_type,
+        actor_id_masked=event.actor_id_masked,
+        previous_status=event.previous_status,
+        new_status=event.new_status,
+        evidence_hash=event.evidence_hash,
+        reason_code=event.reason_code,
+    )
+
+
+def to_dispute_case_view(
+    case: DisputeCase,
+    snapshot: DisputeEvidenceSnapshot | None,
+    history: list[DisputeLifecycleAuditEvent],
+) -> DisputeCaseView:
+    """Present a case and its frozen evidence to an authenticated reviewer."""
+    payload = snapshot.payload if snapshot is not None else {}
+    verified = payload.get("verified_evidence")
+    missing = payload.get("missing_evidence")
+    return DisputeCaseView(
+        case_id=case.case_id,
+        status=case.status,
+        version=case.version,
+        investigation_id=case.investigation_id,
+        masked_account_id=mask_account_id(case.account_id),
+        masked_customer_id=mask_customer_id(case.customer_id),
+        transaction_id=case.transaction_id,
+        merchant_display_name=case.merchant_display_name,
+        amount=case.amount,
+        currency=case.currency,
+        reason=case.reason,
+        reason_code=case.reason_code,
+        verified_evidence=[item for item in verified if isinstance(item, str)] if isinstance(verified, list) else [],
+        missing_evidence=[item for item in missing if isinstance(item, str)] if isinstance(missing, list) else [],
+        applied_policy=str(payload.get("applied_policy") or ""),
+        proposed_action=str(payload.get("proposed_action") or ""),
+        evidence_hash=case.evidence_hash,
+        created_at=case.created_at,
+        updated_at=case.updated_at,
+        reviewer_id=case.reviewer_id,
+        review_reason_code=case.review_reason_code,
+        review_note=case.review_note,
+        reviewed_at=case.reviewed_at,
+        history=[to_lifecycle_event_view(event) for event in history],
+    )
+
+
+def to_review_decision(case: DisputeCase) -> ReviewDecisionData:
+    """Present the outcome of an authenticated reviewer decision."""
+    if case.reviewer_id is None or case.review_reason_code is None or case.reviewed_at is None:
+        raise ValueError("A recorded review must include reviewer identity, reason and timestamp.")
+    return ReviewDecisionData(
+        case_id=case.case_id,
+        status=case.status,
+        version=case.version,
+        reviewer_id=case.reviewer_id,
+        reason_code=case.review_reason_code,
+        note=case.review_note,
+        reviewed_at=case.reviewed_at,
     )

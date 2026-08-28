@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from functools import lru_cache
 from typing import Any
 
 from .foreign_transaction_fee_policy import POLICY_URI as FOREIGN_TRANSACTION_FEE_POLICY_URI
@@ -26,10 +27,19 @@ POLICY_LOADERS: dict[str, PolicyLoader] = {
 }
 
 
+@lru_cache(maxsize=len(POLICY_LOADERS))
 def load_policy(uri: str) -> dict[str, Any] | None:
     """Return the server-owned policy for ``uri``, or ``None`` if it is unknown."""
     loader = POLICY_LOADERS.get(uri.strip())
     return None if loader is None else loader()
+
+
+@lru_cache(maxsize=len(POLICY_LOADERS))
+def _trusted_policy_json_for_uri(uri: str) -> str | None:
+    policy = load_policy(uri)
+    if policy is None:
+        return None
+    return json.dumps(policy, ensure_ascii=False, sort_keys=True)
 
 
 def trusted_policy_json(findings: object) -> str | None:
@@ -39,10 +49,7 @@ def trusted_policy_json(findings: object) -> str | None:
     uri = findings.get("selected_policy_uri")
     if not isinstance(uri, str):
         return None
-    policy = load_policy(uri)
-    if policy is None:
-        return None
-    return json.dumps(policy, ensure_ascii=False, sort_keys=True)
+    return _trusted_policy_json_for_uri(uri.strip())
 
 
 def drop_caller_policy_document(findings: object) -> object:

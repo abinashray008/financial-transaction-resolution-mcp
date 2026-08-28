@@ -13,10 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..domain.enums import (
     AccountStatus,
     AccountType,
-    ApprovalDecision,
+    AuditActorType,
     Confidence,
+    DisputeCaseStatus,
+    DisputeLifecycleEvent,
     DisputeReasonCode,
-    DisputeWorkflowStatus,
+    ReviewReasonCode,
     TransactionStatus,
 )
 from .common import Money, ToolResponseBase
@@ -179,7 +181,11 @@ class AuditTraceResponse(ToolResponseBase):
 
 
 class GeminiSynthesisResult(_Payload):
-    """Structured Gemini output for ``synthesize_investigation``."""
+    """Structured Gemini output for ``synthesize_investigation``.
+
+    The model chooses the narrative and one next action. It never issues the
+    confirmation token, decides eligibility, or sees the case identifier.
+    """
 
     customer_response: str = Field(
         min_length=1,
@@ -188,14 +194,38 @@ class GeminiSynthesisResult(_Payload):
     recommended_action: Literal[
         "NO_ACTION",
         "REQUEST_MORE_INFORMATION",
-        "CREATE_DISPUTE_DRAFT",
+        "REQUEST_CUSTOMER_CONFIRMATION",
     ] = Field(description="Exactly one next action after the customer-facing reply is shown.")
+
+
+class ConfirmationChallengeData(_Payload):
+    """The server-owned confirmation gate returned alongside an eligible synthesis."""
+
+    confirmation_token: str = Field(
+        description=(
+            "One-time token to pass to confirm_unrecognized_transaction, and only after the "
+            "customer explicitly confirms they do not recognize the charge."
+        ),
+    )
+    expires_at: datetime = Field(description="After this instant the token is refused and synthesis must be re-run.")
+    masked_account_id: str
+    transaction_id: str
+    next_tool: Literal["confirm_unrecognized_transaction"] = "confirm_unrecognized_transaction"
+    message: str = Field(description="What the host agent must ask the customer before confirming.")
 
 
 class SynthesisData(GeminiSynthesisResult):
     """Result of ``synthesize_investigation``."""
 
     model_name: str = Field(description="Gemini model that produced the reply.")
+    investigation_id: str = Field(description="Correlation id to reuse when confirming.")
+    confirmation: ConfirmationChallengeData | None = Field(
+        default=None,
+        description=(
+            "Present only when this charge is eligible for a dispute case and no case exists yet. "
+            "Absent means no confirmation can be taken for this investigation."
+        ),
+    )
 
 
 class SynthesisResponse(ToolResponseBase):
@@ -204,64 +234,90 @@ class SynthesisResponse(ToolResponseBase):
     data: SynthesisData | None = None
 
 
-class DisputeDraftData(_Payload):
-    """Result of ``create_dispute_draft``. The case is not yet written and no approval is required."""
+class DisputeCaseCreated(_Payload):
+    """Result of ``confirm_unrecognized_transaction``.
 
-    status: DisputeWorkflowStatus = Field(description="Always pending_review until submit_dispute_case runs.")
+    The case exists and is persisted at this point. It is queued for internal
+    back-office review; nothing has been submitted to an issuer or network.
+    """
+
+    case_id: str
+    status: Literal["PENDING_REVIEW"] = "PENDING_REVIEW"
+    created_at: datetime
+    review_required: Literal[True] = True
+    externally_submitted: Literal[False] = False
+    investigation_id: str
     masked_account_id: str
     masked_customer_id: str = Field(description="Masked customer identifier. The customer's name is never returned.")
+    transaction_id: str
+    reason_code: DisputeReasonCode
+    version: int = Field(description="Optimistic-concurrency version a reviewer must echo back.")
+    evidence_hash: str = Field(description="SHA-256 of the immutable evidence snapshot behind this case.")
+    review_path: str = Field(description="HTTP path where an authenticated reviewer decides this case.")
+    message: str = Field(description="What to tell the customer now that the case exists.")
+
+
+class DisputeCaseCreatedResponse(ToolResponseBase):
+    """Envelope for ``confirm_unrecognized_transaction``."""
+
+    data: DisputeCaseCreated | None = None
+
+
+class DisputeLifecycleEventView(_Payload):
+    """One dispute lifecycle event, as shown to an authenticated reviewer."""
+
+    event_id: str
+    event_type: DisputeLifecycleEvent
+    case_id: str
+    investigation_id: str
+    correlation_id: str
+    timestamp: datetime
+    actor_type: AuditActorType
+    actor_id_masked: str | None
+    previous_status: DisputeCaseStatus | None
+    new_status: DisputeCaseStatus | None
+    evidence_hash: str | None
+    reason_code: str | None
+
+
+class DisputeCaseView(_Payload):
+    """One dispute case and its immutable evidence, for the review application."""
+
+    case_id: str
+    status: DisputeCaseStatus
+    version: int
+    investigation_id: str
+    masked_account_id: str
+    masked_customer_id: str
     transaction_id: str
     merchant_display_name: str
     amount: Money
     currency: str
-    transaction_date: date
     reason: str
     reason_code: DisputeReasonCode
     verified_evidence: list[str]
     missing_evidence: list[str]
-    applied_policy: str = Field(description="Server-owned policy URI applied to this draft.")
+    applied_policy: str = Field(description="Server-owned policy URI applied to this case.")
     proposed_action: str
-    draft_hash: str = Field(description="SHA-256 of the canonical draft payload.")
-    review_path: str = Field(description="HTTP path where a human reviewer records a decision and mints approval_id.")
-    message: str = Field(description="What the human is being asked to approve on the next step.")
-
-
-class DisputeDraftResponse(ToolResponseBase):
-    """Envelope for ``create_dispute_draft``."""
-
-    data: DisputeDraftData | None = None
-
-
-class DisputeDecisionData(_Payload):
-    """Result of ``submit_dispute_case``."""
-
-    workflow_status: DisputeWorkflowStatus
-    masked_account_id: str
-    masked_customer_id: str
-    transaction_id: str
-    case_id: str | None = Field(description="Present only when the human approved and the case was registered.")
-    reason: str
-    decision_note: str | None
-    approval_id: str = Field(description="The one-time approval record that authorized this submission.")
-    registered: bool = Field(description="True only when a dispute_cases row was written.")
-
-
-class ApprovalRecordData(_Payload):
-    """A minted approval record returned to the human review application."""
-
-    approval_id: str
-    request_id: str
-    draft_hash: str
-    reviewer_id: str
-    decision: ApprovalDecision
-    decision_note: str | None
+    evidence_hash: str
     created_at: datetime
-    decided_at: datetime
-    expires_at: datetime
-    consumed_at: datetime | None
+    updated_at: datetime
+    externally_submitted: Literal[False] = False
+    reviewer_id: str | None = None
+    review_reason_code: ReviewReasonCode | None = None
+    review_note: str | None = None
+    reviewed_at: datetime | None = None
+    history: list[DisputeLifecycleEventView] = Field(default_factory=list)
 
 
-class DisputeDecisionResponse(ToolResponseBase):
-    """Envelope for ``submit_dispute_case``."""
+class ReviewDecisionData(_Payload):
+    """Result of an authenticated reviewer decision on a pending case."""
 
-    data: DisputeDecisionData | None = None
+    case_id: str
+    status: DisputeCaseStatus
+    version: int
+    reviewer_id: str = Field(description="Authenticated reviewer identity, derived from the bearer token.")
+    reason_code: ReviewReasonCode
+    note: str | None
+    reviewed_at: datetime
+    externally_submitted: Literal[False] = False

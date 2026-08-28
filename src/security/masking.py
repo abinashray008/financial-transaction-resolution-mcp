@@ -16,6 +16,9 @@ _MAX_INPUT = 32
 
 _NON_DIGITS = re.compile(r"\D")
 _DISALLOWED = re.compile(r"[^A-Za-z0-9-]")
+# Reviewer subjects arrive from a JWT and may be emails or namespaced ids.
+_ACTOR_DISALLOWED = re.compile(r"[^A-Za-z0-9_.:@|-]")
+_ACTOR_VISIBLE_EDGE = 2
 
 
 def _sanitize(value: str) -> str:
@@ -69,6 +72,22 @@ def mask_optional_account_id(account_id: str | None) -> str | None:
     if not _sanitize(account_id):
         return MASK_SEGMENT
     return mask_account_id(account_id)
+
+
+def mask_actor_id(actor_id: str | None) -> str | None:
+    """Mask an authenticated actor identity for the lifecycle audit log.
+
+    Enough of the identity survives to tell two reviewers apart in a trail,
+    but a full email address or JWT subject is never stored.
+    """
+    if actor_id is None:
+        return None
+    cleaned = _ACTOR_DISALLOWED.sub("", actor_id.strip())[:_MAX_INPUT]
+    if not cleaned:
+        return MASK_SEGMENT
+    if len(cleaned) <= _ACTOR_VISIBLE_EDGE * 2:
+        return f"{cleaned[:1]}{MASK_SEGMENT}"
+    return f"{cleaned[:_ACTOR_VISIBLE_EDGE]}{MASK_SEGMENT}{cleaned[-_ACTOR_VISIBLE_EDGE:]}"
 
 
 def mask_card(card_last_four: str) -> str:

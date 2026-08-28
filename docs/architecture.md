@@ -98,8 +98,10 @@ HTTP listener plus SQLite that is simple and safe; there is no ambient session t
 | `merchants` | Merchant catalog | `descriptor_patterns` is a JSON array of billing fragments |
 | `transactions` | Card transactions | `amount_minor` is integer cents |
 | `audit_events` | Sanitized tool invocations | Written on every tool call |
-| `dispute_cases` | Human-approved synthetic case files | Written only after a verified one-time `approval_id` |
-| `approval_records` | Minted human decisions | Created by the review app with `reviewer_id`; consumed once by `submit_dispute_case` |
+| `confirmation_challenges` | One-time customer confirmation tokens | Only the token digest is stored; bound to investigation, account and transaction |
+| `dispute_cases` | Internal synthetic case files | Written at `PENDING_REVIEW` on customer confirmation, then updated in place |
+| `dispute_evidence_snapshots` | Immutable evidence copy | Written in the same transaction as the case; never updated |
+| `dispute_lifecycle_events` | Semantic case lifecycle audit | Distinct from tool telemetry; includes actor type, status transition and hashes |
 
 LangGraph HITL checkpoints live in a **separate** SQLite file (`CHECKPOINT_PATH`, default
 `data/checkpoints.db`), not in these SQLAlchemy tables. That is the demo checkpointer
@@ -120,21 +122,17 @@ Both analysis services are pure: they take domain objects and return a verdict. 
 randomness, no model calls. Customer-facing narrative synthesis lives outside the domain, in
 `src/llm/` and the `synthesize_investigation` tool.
 
-**Human-in-the-loop dispute registration.** After synthesis, `create_dispute_draft` runs a LangGraph
-graph (`src/workflows/dispute_case.py`) with a SQLite checkpointer (`SqliteSaver`). Approval records
-live in the dataset database; paused graph state lives in `CHECKPOINT_PATH` so a process restart
-does not drop `PENDING_REVIEW` drafts. Production should replace this with `PostgresSaver`. The
-graph loads the account-scoped transaction, builds a `PENDING_REVIEW` draft (reason code,
-verified/missing evidence, applied policy, proposed action, draft hash) from stored facts plus the
-investigation findings, then calls `interrupt()`. Creating the draft does not require approval and
-no `dispute_cases` row exists yet. A human reviewer records a decision at
-`GET/POST /reviews/{request_id}` using a verified JWT (`sub` plus a `dispute:review` scope). That path mints a one-time
-`approval_id` bound to `request_id` and `draft_hash`. `submit_dispute_case` accepts only
-`{request_id, approval_id}` — not `approved=true` — verifies the record (match, expiry, unused),
-consumes it, then resumes the same thread with `Command(resume=…)`. Only an `approved` decision
-inserts a row, and that row's `customer_id` is taken from the account — never from the caller. A
-declined record ends the graph without a write. The customer's name never enters graph state or
-the MCP response.
+**Human-in-the-loop dispute cases.** After synthesis, eligible replies include a server-issued
+`confirmation_token`. `confirm_unrecognized_transaction` verifies that token, writes a
+`PENDING_REVIEW` `dispute_cases` row plus an immutable evidence snapshot, then runs a LangGraph
+graph (`src/workflows/dispute_case.py`) that interrupts for back-office review. Paused graph state
+lives in `CHECKPOINT_PATH` so a process restart does not drop the review slot. Production should
+replace this with `PostgresSaver`. An authenticated reviewer records a decision at
+`GET/POST /reviews/{case_id}` using a verified JWT (`sub` plus a `dispute:review` scope) and
+`ReviewDecisionRequest` (`case_id`, `expected_version`, `APPROVE`/`REJECT`, `reason_code`, optional
+`note`). `reviewer_id` is never read from JSON. That path updates the existing case; nothing is
+submitted to an issuer or card network. The customer's name never enters graph state or the MCP
+response.
 
 **`MerchantResolverService`** normalizes a descriptor (upper-case, strip punctuation, drop leading
 aggregator prefixes such as `SQ *`, drop store numbers of three or more digits, drop noise tokens like
@@ -176,9 +174,9 @@ into the host prompt (`src/prompts/investigate_transaction_prompt.py`). Free-tex
 ASCII control characters (`src/security/prompt_injection.py`, `src/app/validators.py`). Gemini
 synthesis fences caller findings behind a nonce delimiter, loads policy from this server's resources
 instead of a `policy` object the caller embedded, and rejects model output that tries to hijack the
-host agent (`src/llm/gemini_client.py`). The human approval gate on `submit_dispute_case` is
-still required even if a model or tool payload asks to skip it: the write path verifies a minted
-`approval_id`, and a boolean `approved` flag is not accepted.
+host agent (`src/llm/gemini_client.py`). Opening a case still requires a server-issued
+`confirmation_token` even if a model or tool payload asks to skip confirmation: the write path
+verifies that token, and a boolean `approved` flag is not accepted.
 
 **Descope authenticates HTTP, not stdio.** `--transport http` constructs FastMCP's
 `DescopeProvider` (`src/security/descope.py`) from `DESCOPE_CONFIG_URL` and `BASE_URL`. Unauthenticated
@@ -187,8 +185,8 @@ attach the provider: OAuth DCR is not a stdio protocol. HTTP refuses to bind if 
 is missing or not a Descope MCP Server / inbound-app URL.
 
 **Reviewer identity is a verified JWT claim, not a client-supplied field.** FastMCP's Descope
-middleware wraps `/mcp` only. Both `GET /reviews/{request_id}` and
-`POST /reviews/{request_id}/decision` authenticate in `src/security/reviewer.py`: the bearer JWT
+middleware wraps `/mcp` only. Both `GET /reviews/{case_id}` and
+`POST /reviews/{case_id}/decision` authenticate in `src/security/reviewer.py`: the bearer JWT
 signature, issuer, audience and expiry are verified, identity is taken from `sub`, and a
 `dispute:review` scope or role is required. `X-Reviewer-Id` and HTML form reviewer ids are accepted
 only when `REVIEW_AUTH_MODE=local-demo`. Unsigned JWT payloads are never trusted.
@@ -222,12 +220,15 @@ truncated.
 | `INVALID_AMOUNT_RANGE` | `TransactionSearchCriteria`, `DuplicateCheckCriteria` | That the range is impossible |
 | `SYNTHESIS_UNAVAILABLE` | Synthesis handler | Gemini is not configured or failed |
 | `DISPUTE_ALREADY_EXISTS` | Dispute workflow | A case is already registered for this charge |
-| `DISPUTE_WORKFLOW_NOT_FOUND` | Dispute workflow | No paused proposal for this `request_id` and account |
-| `DISPUTE_NOT_AWAITING_APPROVAL` | Dispute workflow | The graph is not waiting on a human decision |
-| `DISPUTE_APPROVAL_NOT_FOUND` | Approval service | No record matches this `approval_id` and `request_id` |
-| `DISPUTE_APPROVAL_EXPIRED` | Approval service | The minted token is past `expires_at` |
-| `DISPUTE_APPROVAL_ALREADY_CONSUMED` | Approval service | The one-time `approval_id` was already used |
-| `DISPUTE_APPROVAL_MISMATCH` | Approval service | The token's `draft_hash` does not match the paused draft |
+| `DISPUTE_WORKFLOW_NOT_FOUND` | Dispute workflow | No paused review for this `case_id` |
+| `DISPUTE_NOT_AWAITING_REVIEW` | Dispute workflow | The graph is not waiting on a human decision |
+| `DISPUTE_CASE_NOT_FOUND` | Review application | No case exists for this `case_id` |
+| `DISPUTE_CASE_VERSION_CONFLICT` | Review application | `expected_version` does not match the stored case |
+| `DISPUTE_REVIEW_ALREADY_RECORDED` | Review application | The case is no longer `PENDING_REVIEW` |
+| `CONFIRMATION_NOT_FOUND` | Confirmation service | No challenge matches this `confirmation_token` |
+| `CONFIRMATION_EXPIRED` | Confirmation service | The token is past `expires_at` |
+| `CONFIRMATION_ALREADY_USED` | Confirmation service | The one-time token was already used |
+| `CONFIRMATION_MISMATCH` | Confirmation service | The token was issued for a different investigation subject |
 | `INTERNAL_ERROR` | `execute_tool` fallbacks | A generic message; detail goes to stderr |
 
 FastMCP is additionally configured with `mask_error_details=True`, so an exception escaping the

@@ -4,6 +4,7 @@ Fictional guidance for late-payment fees on synthetic card accounts. Not a real
 issuer policy and not affiliated with any financial institution.
 """
 
+from functools import lru_cache
 from typing import Any
 
 POLICY_URI = "policy://fees/late-payment"
@@ -14,6 +15,7 @@ DISCLAIMER = (
 )
 
 
+@lru_cache(maxsize=1)
 def get_late_payment_fee_policy() -> dict[str, Any]:
     """Return the late-payment fee policy payload."""
     return {

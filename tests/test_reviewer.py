@@ -242,30 +242,43 @@ async def test_jwt_mode_identity_comes_from_sub_not_header(review_keys: RSAKeyPa
 
 
 def test_http_review_get_and_post_require_verified_jwt(container, review_keys: RSAKeyPair):
-    request_id = "inv-rev-jwt"
-    assert _draft(container, request_id=request_id).status == "ok"
+    drafted = _draft(container, request_id="inv-rev-jwt")
+    assert drafted.status == "ok"
+    assert drafted.data is not None
+    case_id = drafted.data.case_id
     server = create_mcp_server(container, review_auth=_jwt_review_auth(review_keys))
     token = _token(review_keys, subject="rev-http-jwt")
 
     with TestClient(server.http_app()) as client:
-        denied_get = client.get(f"/reviews/{request_id}", headers={"accept": "application/json"})
+        denied_get = client.get(f"/reviews/{case_id}", headers={"accept": "application/json"})
         denied_post = client.post(
-            f"/reviews/{request_id}/decision",
+            f"/reviews/{case_id}/decision",
             headers={"x-reviewer-id": "rev-spoof", "accept": "application/json"},
-            json={"decision": "approved"},
+            json={
+                "case_id": case_id,
+                "expected_version": 1,
+                "decision": "APPROVE",
+                "reason_code": "EVIDENCE_SUPPORTS_DISPUTE",
+            },
         )
         shown = client.get(
-            f"/reviews/{request_id}",
+            f"/reviews/{case_id}",
             headers={"authorization": f"Bearer {token}", "accept": "application/json"},
         )
-        minted = client.post(
-            f"/reviews/{request_id}/decision",
+        decided = client.post(
+            f"/reviews/{case_id}/decision",
             headers={
                 "authorization": f"Bearer {token}",
                 "x-reviewer-id": "rev-spoof",
                 "accept": "application/json",
             },
-            json={"decision": "approved", "decision_note": "Reviewed", "reviewer_id": "rev-form-spoof"},
+            json={
+                "case_id": case_id,
+                "expected_version": shown.json()["version"],
+                "decision": "APPROVE",
+                "reason_code": "EVIDENCE_SUPPORTS_DISPUTE",
+                "note": "Reviewed",
+            },
         )
 
     assert denied_get.status_code == 401
@@ -274,19 +287,21 @@ def test_http_review_get_and_post_require_verified_jwt(container, review_keys: R
     assert denied_post.status_code == 401
     assert shown.status_code == 200
     assert shown.json()["transaction_id"] == "TXN-SCN-DUP-A"
-    assert minted.status_code == 201
-    assert minted.json()["reviewer_id"] == "rev-http-jwt"
+    assert decided.status_code == 200
+    assert decided.json()["reviewer_id"] == "rev-http-jwt"
 
 
 def test_http_review_html_has_no_reviewer_field_in_jwt_mode(container, review_keys: RSAKeyPair):
-    request_id = "inv-rev-html-jwt"
-    assert _draft(container, request_id=request_id).status == "ok"
+    drafted = _draft(container, request_id="inv-rev-html-jwt")
+    assert drafted.status == "ok"
+    assert drafted.data is not None
+    case_id = drafted.data.case_id
     server = create_mcp_server(container, review_auth=_jwt_review_auth(review_keys))
     token = _token(review_keys)
 
     with TestClient(server.http_app()) as client:
         shown = client.get(
-            f"/reviews/{request_id}",
+            f"/reviews/{case_id}",
             headers={"authorization": f"Bearer {token}", "accept": "text/html"},
         )
 

@@ -31,8 +31,9 @@ Every evidence tool is scoped to a single account. Analysis is deterministic and
 same question always produces the same answer and every conclusion names the rule that produced it.
 The host agent supplies judgement; the server supplies facts it cannot invent. The reusable
 `investigate_transaction` prompt sequences that work, then `synthesize_investigation` calls Gemini
-to draft the customer-facing reply. After that reply, a LangGraph human-in-the-loop workflow can
-register a synthetic dispute case — but only if the end user explicitly approves.
+to draft the customer-facing reply. After that reply, the customer must explicitly confirm they do
+not recognize the charge. Only then does `confirm_unrecognized_transaction` persist an internal
+`PENDING_REVIEW` case for back-office review.
 
 This is a local demo of MCP server design, layered architecture, PII handling and deterministic
 domain logic. It is not a real issuer dispute system. Registering a case writes a row to SQLite; it
@@ -52,10 +53,10 @@ does not file, approve or resolve a dispute with a card network.
   `get_audit_trace` (tool names and outcomes only; no PII).
 - **Customer-facing summary.** After evidence is gathered, synthesize a reply with Gemini that
   follows the selected policy and never claims an issuer filed a dispute.
-- **Human-approved dispute case.** After synthesis, `create_dispute_draft` returns a
-  `PENDING_REVIEW` proposal (no approval required). A human reviewer records a decision in the
-  review application, which mints a one-time `approval_id`. `submit_dispute_case` writes a
-  `dispute_cases` row only after that id is verified.
+- **Confirmed dispute case.** After synthesis, the customer must confirm they do not recognize the
+  charge. `confirm_unrecognized_transaction` verifies the server-issued token and writes a
+  `PENDING_REVIEW` case immediately. An authenticated reviewer later approves or rejects that same
+  case. Nothing is submitted to an issuer.
 
 ## Demo
 
@@ -65,9 +66,9 @@ Run the server from Cursor (or another MCP client) and ask:
 
 That scenario is a same-day double post at Halcyon Electronics. The agent should ask for any missing
 ids, read `policy://disputes/unrecognized-transaction`, gather evidence with the tools, finish
-with `synthesize_investigation`, then — only if you approve — register a synthetic dispute case
-through the LangGraph human-in-the-loop tools. A full tool-by-tool walkthrough is in
-[Example Queries](#example-queries).
+with `synthesize_investigation`, then — only if the customer confirms they do not recognize the
+charge — open an internal `PENDING_REVIEW` case with `confirm_unrecognized_transaction`. A full
+tool-by-tool walkthrough is in [Example Queries](#example-queries).
 
 ## Architecture & System Design
 
@@ -135,12 +136,12 @@ the agent to stop and ask the caller — that is the user-feedback gate. The age
 policy resource (`policy://disputes/unrecognized-transaction`, `policy://fees/foreign-transaction`,
 or `policy://fees/late-payment`), calls the evidence tools, and finishes with
 `synthesize_investigation`. Evidence analysis never calls a model. Gemini is used only to draft the
-final customer-facing narrative from the gathered envelopes and the selected policy. If the end user
-then wants a dispute case, `create_dispute_draft` starts a LangGraph graph and returns a
-`PENDING_REVIEW` proposal without writing a case. A human reviewer mints a one-time `approval_id`
-at `/reviews/{request_id}` after presenting a verified JWT (`sub` plus `dispute:review`);
-`submit_dispute_case` accepts only `request_id` and `approval_id` and
-writes `dispute_cases` only when that record is an unused, unexpired approval.
+final customer-facing narrative from the gathered envelopes and the selected policy. If Gemini
+recommends confirmation, the synthesis response includes a one-time `confirmation_token`. After the
+customer explicitly confirms they do not recognize the charge, `confirm_unrecognized_transaction`
+writes a `PENDING_REVIEW` case (and an immutable evidence snapshot) before LangGraph pauses for
+authenticated back-office review at `/reviews/{case_id}`. Reviewer identity comes from a verified
+JWT (`sub` plus `dispute:review`); `reviewer_id` is not accepted in the JSON body.
 
 The only external API is Google Gemini (`google-genai`, default model `gemini-2.5-pro`), and only
 the synthesis tool needs `GEMINI_API_KEY`. Search, merchant resolution, duplicate detection and
@@ -176,20 +177,21 @@ configuration.
 #### Server and registration
 
 - `src/server.py` — FastMCP instance, instructions, stdio and Descope-authenticated HTTP.
-- `src/routers/tools.py` — Nine tools. Evidence tools and synthesis use `readOnlyHint`;
-  `submit_dispute_case` is the only write and requires a minted `approval_id`.
+- `src/routers/tools.py` — Eight tools. Evidence tools and synthesis use `readOnlyHint`;
+  `confirm_unrecognized_transaction` is the write and requires a server-issued `confirmation_token`.
 - `src/routers/prompts.py` — `investigate_transaction`.
 - `src/routers/resources.py` — `status://server` and three policy URIs.
-- `src/routers/reviews.py` — Human review application: display a draft and mint `approval_id`.
+- `src/routers/reviews.py` — Human review application: display a persisted case and record
+  APPROVE/REJECT against the existing row.
 
 #### MCP capabilities
 
 - `src/tools/` — One handler per tool (`get_account_summary`, `search_transactions`,
   `get_transaction_details`, `resolve_merchant`, `check_duplicate_charge`, `get_audit_trace`,
-  `synthesize_investigation`, `create_dispute_draft`, `submit_dispute_case`).
-- `src/workflows/dispute_case.py` — LangGraph graph: load context, build a PENDING_REVIEW draft,
-  interrupt, persist only after a verified approval record. SQLite-checkpointed so pending drafts
-  survive restarts (PostgreSQL in production).
+  `synthesize_investigation`, `confirm_unrecognized_transaction`).
+- `src/workflows/dispute_case.py` — LangGraph graph: checkpoint the already-written PENDING_REVIEW
+  case, interrupt for back-office review, resume after the case row is updated. SQLite-checkpointed
+  so pending reviews survive restarts (PostgreSQL in production).
 - `src/workflows/checkpointer.py` — Demo `SqliteSaver` factory. Production should use `PostgresSaver`.
 - `src/prompts/investigate_transaction_prompt.py` — Agentic workflow text, including the ask-the-caller
   gate and the post-synthesis human-approval phase.
@@ -260,7 +262,7 @@ Course-required capabilities implemented in this server, with a brief descriptio
 | Feature | Description |
 | --- | --- |
 | **MCP server in Python with FastMCP** | `src/server.py` creates a FastMCP app, sets instructions, enables `mask_error_details=True`, and registers tools, prompts and resources. Stdio is the default (`uv run python -m src.server`). HTTP (`--transport http`) requires Descope. |
-| **MCP tools** | Nine tools in `src/tools/`, registered in `src/routers/tools.py`. Evidence tools are read-only and return `{status, request_id, data, error}`. Catalog below. |
+| **MCP tools** | Eight tools in `src/tools/`, registered in `src/routers/tools.py`. Evidence tools are read-only and return `{status, request_id, data, error}`. Catalog below. |
 | **MCP prompt with user feedback** | `investigate_transaction` (`src/prompts/investigate_transaction_prompt.py`). If `account_id` or `transaction_id` is missing, the agent must stop and ask the caller before any tool call. If the concern is unclear, it asks one clarifying question, then maps the concern to a policy resource. |
 | **Structured tool inputs and outputs** | Pydantic v2 request/response models in `src/contracts/`. FastMCP generates JSON Schema from typed arguments. |
 | **Synthetic data in SQLite** | Generated dataset in `data/transactions.db` via `scripts/generate_data.py` / `src/app/data_seed.py`. No live financial APIs. |
@@ -281,9 +283,8 @@ Course-required capabilities implemented in this server, with a brief descriptio
 | `resolve_merchant` | Deterministic descriptor → merchant match with rule, score and explanation. | `raw_descriptor` |
 | `check_duplicate_charge` | Rule-based duplicate check with `LOW` / `MEDIUM` / `HIGH` confidence. | `account_id`, `transaction_id` |
 | `get_audit_trace` | Sanitized audit events for a correlation id. | `request_id` |
-| `synthesize_investigation` | Gemini drafts a customer-facing reply from gathered envelopes. Requires `GEMINI_API_KEY`. | `account_id`, `transaction_id`, `investigation_findings` |
-| `create_dispute_draft` | Builds a `PENDING_REVIEW` proposal (reason code, evidence, policy, proposed action, draft hash). Does not require approval and does not write a case. | `account_id`, `transaction_id`, `investigation_findings`, `synthesis_summary` |
-| `submit_dispute_case` | Creates a synthetic dispute case after verifying a minted `approval_id`. `approved=true` is not accepted. | `request_id`, `approval_id` |
+| `synthesize_investigation` | Gemini drafts a customer-facing reply from gathered envelopes. Eligible replies include a one-time `confirmation_token`. Requires `GEMINI_API_KEY`. | `account_id`, `transaction_id`, `investigation_findings` |
+| `confirm_unrecognized_transaction` | After explicit customer confirmation, verifies the server-issued token and writes a `PENDING_REVIEW` case. Returns `case_id` and a 10-business-day message. | `investigation_id`, `account_id`, `transaction_id`, `confirmation_token`, `idempotency_key` |
 
 ## Custom Features
 
@@ -303,7 +304,7 @@ Features implemented beyond the course minimum, with a brief description of each
 | **Escaped `LIKE` wildcards** | A `%` or `_` in `merchant_query` cannot widen the SQL search. |
 | **Cross-account isolation** | Every transaction query includes `account_id` in `WHERE`. A charge on another account returns the same `TRANSACTION_NOT_FOUND` as a missing id. |
 | **Opik agent observability** | Optional [Opik](https://www.comet.com/docs/opik/) tracing (`src/observability/tracing.py`). MCP tool calls become spans grouped by `request_id`; Gemini synthesis is `@track`'d for token usage and LLM call latency; the HITL LangGraph workflow is wrapped with `track_langgraph`. Payloads are sanitized (no names, descriptors or transaction bodies). |
-| **LangGraph human-in-the-loop disputes** | After synthesis, `create_dispute_draft` interrupts a LangGraph graph with a `PENDING_REVIEW` proposal. The demo persists paused threads with a SQLite checkpointer (`CHECKPOINT_PATH`) so they survive process restarts; production should use PostgreSQL (`PostgresSaver`). A human reviewer records a decision at `/reviews/{request_id}` with a verified JWT (`sub` plus `dispute:review`). That mints a one-time `approval_id`. `submit_dispute_case` verifies that id before writing. An approved record inserts a `dispute_cases` row for the same `customer_id` as the account; a decline writes nothing. |
+| **LangGraph human-in-the-loop disputes** | After customer confirmation, `confirm_unrecognized_transaction` writes a `PENDING_REVIEW` case and immutable evidence snapshot, then LangGraph pauses for back-office review. The demo persists paused threads with a SQLite checkpointer (`CHECKPOINT_PATH`) so they survive process restarts; production should use PostgreSQL (`PostgresSaver`). An authenticated reviewer records APPROVE or REJECT at `/reviews/{case_id}` with a verified JWT (`sub` plus `dispute:review`) and `expected_version`. That updates the existing case; nothing is submitted externally. |
 | **Descope HTTP authentication** | `--transport http` uses FastMCP's `DescopeProvider`. MCP clients register via Dynamic Client Registration and send a Descope JWT. Custom `/reviews/*` routes are not wrapped by that middleware; they verify JWTs themselves (`src/security/reviewer.py`) and require `dispute:review`. Stdio stays local-trust and does not speak OAuth. |
 | **Prompt-injection hardening** | Prompt arguments are interpolated only when they match identifier patterns. Gemini fences untrusted findings, uses a server-loaded policy, and rejects host-agent hijack output. Free-text fields reject control characters. |
 
@@ -441,8 +442,8 @@ BASE_URL=http://127.0.0.1:8000
 HTTP_HOST=127.0.0.1
 HTTP_PORT=8000
 
-# How long a minted dispute approval_id remains usable
-APPROVAL_TTL_SECONDS=900
+# How long a synthesize_investigation confirmation_token remains usable
+CONFIRMATION_TTL_SECONDS=900
 
 # Review-route identity. jwt (default) verifies bearer JWTs on GET/POST /reviews/*
 # and takes reviewer_id from the token sub. local-demo allows form/header ids.
@@ -469,7 +470,7 @@ REVIEW_REQUIRED_SCOPE=dispute:review
 | `BASE_URL` | HTTP only | `http://127.0.0.1:8000` | Public URL advertised in OAuth protected-resource metadata | Match the URL clients use to reach this server |
 | `HTTP_HOST` | HTTP only | `127.0.0.1` | Bind address for `--transport http` | Use `0.0.0.0` only if you intend to listen beyond loopback |
 | `HTTP_PORT` | HTTP only | `8000` | Bind port for `--transport http` | Choose freely |
-| `APPROVAL_TTL_SECONDS` | No | `900` | Lifetime of a minted dispute `approval_id` | 60–86400 seconds |
+| `CONFIRMATION_TTL_SECONDS` | No | `900` | Lifetime of a synthesis `confirmation_token` | 60–86400 seconds |
 | `REVIEW_AUTH_MODE` | No | `jwt` | How `/reviews/*` identifies the reviewer. `jwt` verifies signature, issuer, audience and expiry, then uses `sub`. `local-demo` allows `X-Reviewer-Id` and the HTML form — local demos only | `jwt` or `local-demo` |
 | `REVIEW_REQUIRED_SCOPE` | No | `dispute:review` | Scope or role a verified reviewer JWT must include | Choose freely; grant it only to human reviewers |
 
@@ -546,8 +547,8 @@ Is TXN-SCN-DUP-A on ACCT-0001 a duplicate?
 # Example 6: contrast — expected repeat, not a duplicate
 Check TXN-SCN-HOLD-02 on ACCT-0001 (hotel hold vs posted settlement)
 
-# Example 7: after synthesis, human-approved dispute registration
-The customer wants a dispute case for TXN-SCN-DUP-A on ACCT-0001 (approve the LangGraph proposal)
+# Example 7: after synthesis, customer-confirmed dispute case
+The customer does not recognize TXN-SCN-DUP-A on ACCT-0001 and confirms that after the Gemini reply
 ```
 
 Expected highlights for the duplicate scenario:
@@ -558,10 +559,11 @@ Expected highlights for the duplicate scenario:
 3. `resolve_merchant` → Halcyon Electronics, `HIGH` confidence, `prefix_match`.
 4. `check_duplicate_charge` → `duplicate_likely: true`, `HIGH`, candidate `TXN-SCN-DUP-B`.
 5. `get_audit_trace` → tool names, timestamps, masked account, outcome, duration. No arguments or names.
-6. After synthesis, `create_dispute_draft` → `pending_review` (no `dispute_cases` row yet).
-7. If a human reviewer records an approval at `/reviews/{request_id}`, `submit_dispute_case` with
-   that `approval_id` → `DSP-…` registered for the same customer as `ACCT-0001`. A declined
-   approval record writes nothing. `approved=true` is not accepted.
+6. After synthesis, show the reply. If `confirmation` is present and the customer confirms they
+   do not recognize the charge, `confirm_unrecognized_transaction` → `PENDING_REVIEW` with a
+   `DSP-…` `case_id` and “We will investigate the case and get back in 10 business days.”
+7. An authenticated reviewer records APPROVE or REJECT at `/reviews/{case_id}` with
+   `expected_version`. That updates the existing case. `approved=true` is not accepted.
 
 The hotel pair (`TXN-SCN-HOLD-01` / `TXN-SCN-HOLD-02`) returns **LOW** confidence: an authorization
 hold paired with a posted charge is normal settlement, not a duplicate. Monthly subscriptions are
@@ -674,7 +676,7 @@ uv run python -m src.server --transport http
 
 The client should discover Descope from protected-resource metadata, register itself (DCR), and
 send a bearer JWT. Unauthenticated `/mcp` calls are rejected at the transport layer. The human
-review app at `/reviews/{request_id}` is a custom route, so it verifies JWTs itself: signature,
+review app at `/reviews/{case_id}` is a custom route, so it verifies JWTs itself: signature,
 issuer, audience, expiry, then `sub` plus a `dispute:review` scope or role. Set
 `REVIEW_AUTH_MODE=local-demo` only if you need the HTML form to accept a reviewer id locally.
 

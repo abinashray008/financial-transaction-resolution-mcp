@@ -1,8 +1,9 @@
-"""Deterministic dispute-draft construction from investigation findings.
+"""Deterministic dispute-evidence construction from investigation findings.
 
-Creates a PENDING_REVIEW proposal: identifiers, reason code, verified vs
-missing evidence, applied policy, proposed action, and a content hash.
-No model calls and no database writes.
+Derives the reviewable body of a case: reason code, verified vs missing
+evidence, applied policy, proposed action, and a content hash. No model calls
+and no database writes. The result is snapshotted when the customer confirms,
+so a reviewer sees exactly what was confirmed.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from ..enums import Confidence, DisputeReasonCode
 
 DEFAULT_POLICY_URI = "policy://disputes/unrecognized-transaction"
 PROPOSED_ACTION = (
-    "Register a synthetic dispute case file after explicit human approval. "
+    "Open an internal synthetic dispute case at PENDING_REVIEW for back-office review. "
     "This does not file, approve, or resolve a dispute with an issuer or card network."
 )
 REQUIRED_EVIDENCE_TOOLS = (
@@ -30,11 +31,32 @@ _POLICY_REASON: dict[str, DisputeReasonCode] = {
     "policy://fees/late-payment": DisputeReasonCode.LATE_PAYMENT_FEE,
 }
 _CONFIDENCE_RANK = {Confidence.LOW: 0, Confidence.MEDIUM: 1, Confidence.HIGH: 2}
+MAX_REASON_LENGTH = 2000
+_MAX_SYNTHESIS_IN_REASON = 1500
+
+
+def build_case_reason(
+    *,
+    merchant_display_name: str,
+    amount: str,
+    currency: str,
+    transaction_date: str,
+    synthesis_summary: str,
+) -> str:
+    """Deterministic case reason from stored facts plus the synthesis narrative."""
+    facts = f"Unrecognized charge at {merchant_display_name} for {amount} {currency} on {transaction_date}."
+    summary = synthesis_summary.strip()
+    if len(summary) > _MAX_SYNTHESIS_IN_REASON:
+        summary = f"{summary[:_MAX_SYNTHESIS_IN_REASON]}…"
+    reason = f"{facts} Synthesis: {summary}"
+    if len(reason) > MAX_REASON_LENGTH:
+        return f"{reason[: MAX_REASON_LENGTH - 1]}…"
+    return reason
 
 
 @dataclass(frozen=True, slots=True)
-class DisputeDraftContent:
-    """The reviewable body of a dispute draft, independent of customer identity."""
+class DisputeEvidenceContent:
+    """The reviewable body of a dispute case, independent of customer identity."""
 
     reason: str
     reason_code: DisputeReasonCode
@@ -42,15 +64,15 @@ class DisputeDraftContent:
     missing_evidence: tuple[str, ...]
     applied_policy: str
     proposed_action: str
-    draft_hash: str
+    evidence_hash: str
 
 
-def build_dispute_draft(
+def build_dispute_evidence(
     *,
     account_id: str,
     masked_account_id: str,
     transaction_id: str,
-    request_id: str,
+    investigation_id: str,
     merchant_display_name: str,
     amount: str,
     currency: str,
@@ -58,8 +80,8 @@ def build_dispute_draft(
     synthesis_summary: str,
     investigation_findings: str,
     proposed_reason: str,
-) -> DisputeDraftContent:
-    """Derive a hash-stable draft from stored facts plus caller-supplied findings."""
+) -> DisputeEvidenceContent:
+    """Derive hash-stable evidence from stored facts plus caller-supplied findings."""
     findings = _parse_findings(investigation_findings)
     applied_policy = _applied_policy(findings)
     verified = _verified_evidence(
@@ -73,10 +95,10 @@ def build_dispute_draft(
     )
     missing = _missing_evidence(findings)
     reason_code = _reason_code(findings, applied_policy=applied_policy, missing=missing)
-    draft_hash = hash_dispute_draft(
+    evidence_hash = hash_dispute_evidence(
         account_id=account_id,
         transaction_id=transaction_id,
-        request_id=request_id,
+        investigation_id=investigation_id,
         reason=proposed_reason,
         reason_code=reason_code.value,
         verified_evidence=verified,
@@ -89,22 +111,22 @@ def build_dispute_draft(
         transaction_date=transaction_date,
         synthesis_summary=synthesis_summary,
     )
-    return DisputeDraftContent(
+    return DisputeEvidenceContent(
         reason=proposed_reason,
         reason_code=reason_code,
         verified_evidence=verified,
         missing_evidence=missing,
         applied_policy=applied_policy,
         proposed_action=PROPOSED_ACTION,
-        draft_hash=draft_hash,
+        evidence_hash=evidence_hash,
     )
 
 
-def hash_dispute_draft(
+def hash_dispute_evidence(
     *,
     account_id: str,
     transaction_id: str,
-    request_id: str,
+    investigation_id: str,
     reason: str,
     reason_code: str,
     verified_evidence: tuple[str, ...],
@@ -117,18 +139,18 @@ def hash_dispute_draft(
     transaction_date: str,
     synthesis_summary: str,
 ) -> str:
-    """SHA-256 over the canonical draft payload. Status is not hashed."""
+    """SHA-256 over the canonical evidence payload. Case status is not hashed."""
     payload = {
         "account_id": account_id,
         "amount": amount,
         "applied_policy": applied_policy,
         "currency": currency,
+        "investigation_id": investigation_id,
         "merchant_display_name": merchant_display_name,
         "missing_evidence": list(missing_evidence),
         "proposed_action": proposed_action,
         "reason": reason,
         "reason_code": reason_code,
-        "request_id": request_id,
         "synthesis_summary": synthesis_summary,
         "transaction_date": transaction_date,
         "transaction_id": transaction_id,

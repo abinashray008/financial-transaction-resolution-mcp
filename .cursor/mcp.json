@@ -1,7 +1,17 @@
 {
   "mcpServers": {
-    "financial-transaction-resolution-http": {
-      "url": "http://127.0.0.1:8000/mcp"
+    "financial-transaction-resolution": {
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "-m",
+        "src.server"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "ENV_FILE_PATH": "${workspaceFolder}/.env"
+      }
     }
   }
 }

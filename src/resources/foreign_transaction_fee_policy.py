@@ -4,6 +4,7 @@ Fictional guidance for foreign-transaction fees on synthetic card activity. Not
 a real issuer policy and not affiliated with any financial institution.
 """
 
+from functools import lru_cache
 from typing import Any
 
 POLICY_URI = "policy://fees/foreign-transaction"
@@ -14,6 +15,7 @@ DISCLAIMER = (
 )
 
 
+@lru_cache(maxsize=1)
 def get_foreign_transaction_fee_policy() -> dict[str, Any]:
     """Return the foreign-transaction fee policy payload."""
     return {
