@@ -12,9 +12,11 @@ from decimal import Decimal
 from .enums import (
     AccountStatus,
     AccountType,
-    ApprovalDecision,
+    AuditActorType,
     DisputeCaseStatus,
+    DisputeLifecycleEvent,
     DisputeReasonCode,
+    ReviewReasonCode,
     TransactionStatus,
 )
 
@@ -100,74 +102,106 @@ class TransactionWithMerchant:
 
 @dataclass(frozen=True, slots=True)
 class DisputeCase:
-    """A human-approved synthetic dispute case file."""
+    """An internal synthetic dispute case file, created on customer confirmation.
+
+    A case is written at ``PENDING_REVIEW`` before any human looks at it, and is
+    only ever updated in place afterwards. ``externally_submitted`` is always
+    false: nothing here is sent to a card network.
+    """
 
     case_id: str
     customer_id: str
     account_id: str
     transaction_id: str
-    request_id: str
-    reason: str
-    status: DisputeCaseStatus
-    amount: Decimal
-    currency: str
-    merchant_display_name: str
-    created_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class DisputeProposal:
-    """A PENDING_REVIEW draft. Creating it does not register a case."""
-
-    request_id: str
-    account_id: str
-    transaction_id: str
-    customer_id: str
-    merchant_display_name: str
-    amount: Decimal
-    currency: str
-    transaction_date: date
+    investigation_id: str
+    confirmation_id: str
+    idempotency_key: str
     reason: str
     reason_code: DisputeReasonCode
-    verified_evidence: tuple[str, ...]
-    missing_evidence: tuple[str, ...]
-    applied_policy: str
-    proposed_action: str
-    draft_hash: str
-    message: str
+    status: DisputeCaseStatus
+    version: int
+    evidence_hash: str
+    amount: Decimal
+    currency: str
+    merchant_display_name: str
+    created_at: datetime
+    updated_at: datetime
+    externally_submitted: bool = False
+    reviewer_id: str | None = None
+    review_reason_code: ReviewReasonCode | None = None
+    review_note: str | None = None
+    reviewed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class DisputeDecision:
-    """Result of resuming the dispute workflow after a verified approval."""
+class DisputeEvidenceSnapshot:
+    """Immutable copy of the evidence a case was created from.
 
-    request_id: str
+    Written in the same transaction as the case and never updated, so a
+    reviewer always sees exactly what the customer confirmed.
+    """
+
+    snapshot_id: str
+    case_id: str
+    investigation_id: str
     account_id: str
     transaction_id: str
-    customer_id: str
-    workflow_status: str
-    case_id: str | None
-    reason: str
-    decision_note: str | None
-    approval_id: str
+    evidence_hash: str
+    payload: dict[str, object]
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
-class DisputeApproval:
-    """One-time human approval record. Minted by the review app, not the LLM."""
+class CustomerConfirmation:
+    """A server-issued challenge that proves the customer confirmed the charge.
 
-    approval_id: str
-    request_id: str
-    draft_hash: str
-    reviewer_id: str
-    decision: ApprovalDecision
-    decision_note: str | None
+    The token itself is never stored; only its digest is, so a leaked database
+    row cannot be replayed as a confirmation.
+    """
+
+    confirmation_id: str
+    investigation_id: str
+    account_id: str
+    transaction_id: str
+    case_id: str
+    customer_id: str
+    evidence_hash: str
+    reason: str
+    reason_code: DisputeReasonCode
+    snapshot: dict[str, object]
+    amount: Decimal
+    currency: str
+    merchant_display_name: str
     created_at: datetime
-    decided_at: datetime
     expires_at: datetime
-    consumed_at: datetime | None
+    consumed_at: datetime | None = None
 
-    @property
-    def is_approved(self) -> bool:
-        """Whether the reviewer approved registration."""
-        return self.decision is ApprovalDecision.APPROVED
+
+@dataclass(frozen=True, slots=True)
+class IssuedConfirmation:
+    """A freshly issued challenge plus the one-time token, returned once."""
+
+    confirmation: CustomerConfirmation
+    confirmation_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class DisputeLifecycleAuditEvent:
+    """One sanitized dispute lifecycle event.
+
+    Distinct from :class:`AuditEvent`, which records tool invocations. Actor
+    identifiers are masked before they reach this model.
+    """
+
+    event_id: str
+    event_type: DisputeLifecycleEvent
+    case_id: str
+    investigation_id: str
+    correlation_id: str
+    timestamp: datetime
+    actor_type: AuditActorType
+    actor_id_masked: str | None
+    previous_status: DisputeCaseStatus | None
+    new_status: DisputeCaseStatus | None
+    evidence_hash: str | None
+    reason_code: str | None

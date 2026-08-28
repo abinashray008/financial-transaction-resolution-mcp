@@ -8,19 +8,28 @@ response as any other expected failure, instead of a transport-level error.
 import json
 import re
 
+from ..domain.enums import (
+    APPROVE_REASON_CODES,
+    REJECT_REASON_CODES,
+    ReviewDecision,
+    ReviewReasonCode,
+)
 from ..domain.exceptions import InvalidInputError
 from ..security.prompt_injection import contains_disallowed_controls, json_strings_are_safe
 
 ACCOUNT_ID_PATTERN = re.compile(r"^ACCT-\d{4,8}$")
 TRANSACTION_ID_PATTERN = re.compile(r"^TXN-[A-Z0-9][A-Z0-9-]{0,40}$")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
-APPROVAL_ID_PATTERN = re.compile(r"^apr-[A-Za-z0-9]{3,32}$")
+CASE_ID_PATTERN = re.compile(r"^DSP-[A-Z0-9]{4,32}$")
+CONFIRMATION_TOKEN_PATTERN = re.compile(r"^cnf_[A-Za-z0-9_-]{32,128}$")
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{8,128}$")
 REVIEWER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:@|-]{1,128}$")
 MAX_DESCRIPTOR_LENGTH = 128
+MAX_CASE_VERSION = 1_000_000
 MAX_MERCHANT_QUERY_LENGTH = 128
 MAX_FINDINGS_LENGTH = 100_000
 MAX_SYNTHESIS_SUMMARY_LENGTH = 20_000
-MAX_DECISION_NOTE_LENGTH = 500
+MAX_REVIEW_NOTE_LENGTH = 500
 _CONTROL_CHAR_MESSAGE = "must not contain control characters."
 
 
@@ -50,11 +59,44 @@ def validate_request_id(value: str) -> str:
     return candidate
 
 
-def validate_approval_id(value: str) -> str:
-    """Check a minted one-time approval id."""
+def validate_case_id(value: str) -> str:
+    """Check a server-minted dispute case identifier."""
+    candidate = value.strip().upper()
+    if not CASE_ID_PATTERN.match(candidate):
+        raise InvalidInputError("case_id must look like 'DSP-1A2B3C4D'.")
+    return candidate
+
+
+def validate_confirmation_token(value: str) -> str:
+    """Check a one-time confirmation token issued by ``synthesize_investigation``."""
     candidate = value.strip()
-    if not APPROVAL_ID_PATTERN.match(candidate):
-        raise InvalidInputError("approval_id must look like 'apr-901'.")
+    if not CONFIRMATION_TOKEN_PATTERN.match(candidate):
+        raise InvalidInputError(
+            "confirmation_token must be the opaque token returned by synthesize_investigation.",
+        )
+    return candidate
+
+
+def validate_idempotency_key(value: str) -> str:
+    """Check the caller's retry key for a confirmation."""
+    candidate = value.strip()
+    if not IDEMPOTENCY_KEY_PATTERN.match(candidate):
+        raise InvalidInputError(
+            "idempotency_key must be 8-128 characters of letters, digits, dash, underscore, dot or colon.",
+        )
+    return candidate
+
+
+def validate_case_version(value: object) -> int:
+    """Check the reviewer's expected case version for optimistic concurrency."""
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise InvalidInputError("expected_version must be a positive integer.")
+    try:
+        candidate = int(value)
+    except ValueError as error:
+        raise InvalidInputError("expected_version must be a positive integer.") from error
+    if candidate < 1 or candidate > MAX_CASE_VERSION:
+        raise InvalidInputError("expected_version must be a positive integer.")
     return candidate
 
 
@@ -130,15 +172,44 @@ def validate_synthesis_summary(value: str) -> str:
     return candidate
 
 
-def validate_decision_note(value: str | None) -> str | None:
-    """Optional human note attached to an approve or decline decision."""
+def validate_review_note(value: str | None) -> str | None:
+    """Optional reviewer note attached to an approve or reject decision."""
     if value is None:
         return None
     candidate = value.strip()
     if not candidate:
         return None
-    if len(candidate) > MAX_DECISION_NOTE_LENGTH:
-        raise InvalidInputError(f"decision_note must be at most {MAX_DECISION_NOTE_LENGTH} characters.")
+    if len(candidate) > MAX_REVIEW_NOTE_LENGTH:
+        raise InvalidInputError(f"note must be at most {MAX_REVIEW_NOTE_LENGTH} characters.")
     if contains_disallowed_controls(candidate, allow_newlines=True):
-        raise InvalidInputError(f"decision_note {_CONTROL_CHAR_MESSAGE}")
+        raise InvalidInputError(f"note {_CONTROL_CHAR_MESSAGE}")
     return candidate
+
+
+def validate_review_decision(value: object) -> ReviewDecision:
+    """Check the reviewer's decision verb."""
+    candidate = value.strip().upper() if isinstance(value, str) else ""
+    try:
+        return ReviewDecision(candidate)
+    except ValueError as error:
+        raise InvalidInputError("decision must be 'APPROVE' or 'REJECT'.") from error
+
+
+def validate_review_reason_code(value: object, *, decision: ReviewDecision) -> ReviewReasonCode:
+    """Check the reason code and that it is one this decision allows."""
+    candidate = value.strip().upper() if isinstance(value, str) else ""
+    try:
+        reason_code = ReviewReasonCode(candidate)
+    except ValueError as error:
+        allowed = ", ".join(sorted(code.value for code in _allowed_reason_codes(decision)))
+        raise InvalidInputError(f"reason_code must be one of: {allowed}.") from error
+    if reason_code not in _allowed_reason_codes(decision):
+        allowed = ", ".join(sorted(code.value for code in _allowed_reason_codes(decision)))
+        raise InvalidInputError(f"reason_code for a {decision.value} decision must be one of: {allowed}.")
+    return reason_code
+
+
+def _allowed_reason_codes(decision: ReviewDecision) -> frozenset[ReviewReasonCode]:
+    if decision is ReviewDecision.APPROVE:
+        return APPROVE_REASON_CODES
+    return REJECT_REASON_CODES

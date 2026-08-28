@@ -19,11 +19,14 @@ class ErrorCode(StrEnum):
     SYNTHESIS_UNAVAILABLE = "SYNTHESIS_UNAVAILABLE"
     DISPUTE_ALREADY_EXISTS = "DISPUTE_ALREADY_EXISTS"
     DISPUTE_WORKFLOW_NOT_FOUND = "DISPUTE_WORKFLOW_NOT_FOUND"
-    DISPUTE_NOT_AWAITING_APPROVAL = "DISPUTE_NOT_AWAITING_APPROVAL"
-    DISPUTE_APPROVAL_NOT_FOUND = "DISPUTE_APPROVAL_NOT_FOUND"
-    DISPUTE_APPROVAL_EXPIRED = "DISPUTE_APPROVAL_EXPIRED"
-    DISPUTE_APPROVAL_ALREADY_CONSUMED = "DISPUTE_APPROVAL_ALREADY_CONSUMED"
-    DISPUTE_APPROVAL_MISMATCH = "DISPUTE_APPROVAL_MISMATCH"
+    DISPUTE_NOT_AWAITING_REVIEW = "DISPUTE_NOT_AWAITING_REVIEW"
+    DISPUTE_CASE_NOT_FOUND = "DISPUTE_CASE_NOT_FOUND"
+    DISPUTE_CASE_VERSION_CONFLICT = "DISPUTE_CASE_VERSION_CONFLICT"
+    DISPUTE_REVIEW_ALREADY_RECORDED = "DISPUTE_REVIEW_ALREADY_RECORDED"
+    CONFIRMATION_NOT_FOUND = "CONFIRMATION_NOT_FOUND"
+    CONFIRMATION_EXPIRED = "CONFIRMATION_EXPIRED"
+    CONFIRMATION_ALREADY_USED = "CONFIRMATION_ALREADY_USED"
+    CONFIRMATION_MISMATCH = "CONFIRMATION_MISMATCH"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -104,31 +107,49 @@ class DisputeWorkflowNotFoundError(DomainError):
     code = ErrorCode.DISPUTE_WORKFLOW_NOT_FOUND
 
 
-class DisputeNotAwaitingApprovalError(DomainError):
-    """The dispute workflow is not waiting for a human decision."""
+class DisputeNotAwaitingReviewError(DomainError):
+    """The dispute workflow is not waiting for a back-office review decision."""
 
-    code = ErrorCode.DISPUTE_NOT_AWAITING_APPROVAL
-
-
-class DisputeApprovalNotFoundError(DomainError):
-    """No approval record matches this approval_id and request_id pair."""
-
-    code = ErrorCode.DISPUTE_APPROVAL_NOT_FOUND
+    code = ErrorCode.DISPUTE_NOT_AWAITING_REVIEW
 
 
-class DisputeApprovalExpiredError(DomainError):
-    """The approval record is past its expiry and can no longer be used."""
+class DisputeCaseNotFoundError(DomainError):
+    """No dispute case exists for this case_id."""
 
-    code = ErrorCode.DISPUTE_APPROVAL_EXPIRED
-
-
-class DisputeApprovalAlreadyConsumedError(DomainError):
-    """The one-time approval_id has already been used to submit a case."""
-
-    code = ErrorCode.DISPUTE_APPROVAL_ALREADY_CONSUMED
+    code = ErrorCode.DISPUTE_CASE_NOT_FOUND
 
 
-class DisputeApprovalMismatchError(DomainError):
-    """The approval record does not match the paused draft (hash or subject)."""
+class DisputeCaseVersionConflictError(DomainError):
+    """The case was modified since the reviewer loaded it."""
 
-    code = ErrorCode.DISPUTE_APPROVAL_MISMATCH
+    code = ErrorCode.DISPUTE_CASE_VERSION_CONFLICT
+
+
+class DisputeReviewAlreadyRecordedError(DomainError):
+    """A review decision was already recorded for this case."""
+
+    code = ErrorCode.DISPUTE_REVIEW_ALREADY_RECORDED
+
+
+class ConfirmationNotFoundError(DomainError):
+    """No pending customer confirmation matches the supplied token."""
+
+    code = ErrorCode.CONFIRMATION_NOT_FOUND
+
+
+class ConfirmationExpiredError(DomainError):
+    """The customer confirmation token is past its expiry."""
+
+    code = ErrorCode.CONFIRMATION_EXPIRED
+
+
+class ConfirmationAlreadyUsedError(DomainError):
+    """The one-time customer confirmation token has already been used."""
+
+    code = ErrorCode.CONFIRMATION_ALREADY_USED
+
+
+class ConfirmationMismatchError(DomainError):
+    """The confirmation token was issued for a different investigation subject."""
+
+    code = ErrorCode.CONFIRMATION_MISMATCH

@@ -109,10 +109,10 @@ class Settings(BaseSettings):
         alias="HTTP_PORT",
         description="Bind port for HTTP transport.",
     )
-    approval_ttl_seconds: int = Field(
+    confirmation_ttl_seconds: int = Field(
         default=900,
-        alias="APPROVAL_TTL_SECONDS",
-        description="How long a minted dispute approval_id remains usable.",
+        alias="CONFIRMATION_TTL_SECONDS",
+        description="How long a synthesize_investigation confirmation_token remains usable.",
         ge=60,
         le=86_400,
     )

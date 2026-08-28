@@ -151,7 +151,7 @@ def score_answer(result: GeminiSynthesisResult, expected: DuplicateChargeExpecte
         ),
         "confidence_correct": _mentions_exact_value(normalized, expected["confidence"]),
         "human_gate_preserved": (
-            result.recommended_action == "CREATE_DISPUTE_DRAFT"
+            result.recommended_action == "REQUEST_CUSTOMER_CONFIRMATION"
             or any(_mentions_unnegated_phrase(normalized, phrase) for phrase in PENDING_GATE_PHRASES)
         )
         and not any(phrase in normalized for phrase in HUMAN_GATE_BYPASS_PHRASES),

@@ -9,6 +9,7 @@ an MCP client.
 
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -88,30 +89,46 @@ class SynthesizeInvestigationRequest(_Request):
     )
 
 
-class CreateDisputeDraftRequest(_Request):
-    """Input for ``create_dispute_draft``."""
+class ConfirmUnrecognizedTransactionRequest(BaseModel):
+    """Input for ``confirm_unrecognized_transaction``.
 
-    account_id: str
-    transaction_id: str
-    investigation_findings: str = Field(
-        description=(
-            "JSON object collecting the earlier tool envelopes. Required so a dispute "
-            "draft cannot be created without an investigation."
-        ),
-    )
-    synthesis_summary: str = Field(
-        description="Customer-facing reply from synthesize_investigation that the draft is based on.",
-    )
-
-
-class SubmitDisputeCaseRequest(BaseModel):
-    """Input for ``submit_dispute_case``. A minted ``approval_id`` is required."""
+    Extra fields are forbidden so a caller cannot smuggle in its own evidence,
+    reviewer identity, case status or approval flag. The only proof this tool
+    accepts is the server-issued ``confirmation_token``.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    request_id: str = Field(
-        description="The same correlation id used for create_dispute_draft and the investigation.",
+    investigation_id: str = Field(
+        description="Correlation id of the investigation, returned by synthesize_investigation.",
     )
-    approval_id: str = Field(
-        description="One-time id minted by the human review application after an authenticated decision.",
+    account_id: str
+    transaction_id: str
+    confirmation_token: str = Field(
+        description=(
+            "One-time token issued by synthesize_investigation. Present it only after the "
+            "customer has explicitly confirmed they do not recognize the charge."
+        ),
     )
+    idempotency_key: str = Field(
+        description="Caller-chosen retry key. Repeating a confirmation with the same key returns the same case.",
+    )
+
+
+class ReviewDecisionRequest(BaseModel):
+    """A back-office reviewer's decision on one pending dispute case.
+
+    Used by the authenticated HTTP review application, not by an MCP tool.
+    ``reviewer_id`` is deliberately absent: identity comes from the verified
+    bearer token, never from the request body.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    case_id: str
+    expected_version: int = Field(
+        description="Case version the reviewer loaded. A stale value is rejected instead of overwriting.",
+    )
+    decision: Literal["APPROVE", "REJECT"]
+    reason_code: str = Field(description="Closed-vocabulary reason for this decision.")
+    note: str | None = None

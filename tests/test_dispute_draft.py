@@ -3,12 +3,12 @@
 import json
 
 from src.domain.enums import DisputeReasonCode
-from src.domain.services.dispute_draft import (
+from src.domain.services.dispute_evidence import (
     DEFAULT_POLICY_URI,
     PROPOSED_ACTION,
     REQUIRED_EVIDENCE_TOOLS,
-    build_dispute_draft,
-    hash_dispute_draft,
+    build_dispute_evidence,
+    hash_dispute_evidence,
 )
 from src.resources.policies import POLICY_LOADERS
 from src.security.masking import mask_account_id
@@ -18,11 +18,11 @@ MASKED_ACCOUNT = mask_account_id(ACCOUNT_ID)
 
 
 def _draft(*, findings: dict, synthesis: str = "Customer does not recognize the charge."):
-    return build_dispute_draft(
+    return build_dispute_evidence(
         account_id=ACCOUNT_ID,
         masked_account_id=MASKED_ACCOUNT,
         transaction_id="TXN-SCN-DUP-A",
-        request_id="inv-draft-1",
+        investigation_id="inv-draft-1",
         merchant_display_name="Halcyon Electronics",
         amount="89.99",
         currency="USD",
@@ -44,7 +44,7 @@ def test_sparse_findings_are_pending_specialist_review():
     assert draft.reason_code == DisputeReasonCode.NEEDS_SPECIALIST_REVIEW
     assert draft.applied_policy == DEFAULT_POLICY_URI
     assert draft.proposed_action == PROPOSED_ACTION
-    assert len(draft.draft_hash) == 64
+    assert len(draft.evidence_hash) == 64
     assert ACCOUNT_ID not in " ".join(draft.verified_evidence)
     missing_tools = {tool for tool in REQUIRED_EVIDENCE_TOOLS if any(tool in item for item in draft.missing_evidence)}
     assert missing_tools == {"get_account_summary", "resolve_merchant", "check_duplicate_charge"}
@@ -97,18 +97,18 @@ def test_foreign_fee_policy_reason_when_evidence_is_complete():
     assert draft.applied_policy == "policy://fees/foreign-transaction"
 
 
-def test_draft_hash_is_stable_and_changes_when_reason_changes():
+def test_evidence_hash_is_stable_and_changes_when_reason_changes():
     findings = {"get_transaction_details": {"status": "ok", "data": {"transaction": {}}}}
     first = _draft(findings=findings)
     second = _draft(findings=findings)
     different = _draft(findings=findings, synthesis="A different narrative.")
 
-    assert first.draft_hash == second.draft_hash
-    assert first.draft_hash != different.draft_hash
-    rebuilt = hash_dispute_draft(
+    assert first.evidence_hash == second.evidence_hash
+    assert first.evidence_hash != different.evidence_hash
+    rebuilt = hash_dispute_evidence(
         account_id=ACCOUNT_ID,
         transaction_id="TXN-SCN-DUP-A",
-        request_id="inv-draft-1",
+        investigation_id="inv-draft-1",
         reason=first.reason,
         reason_code=first.reason_code.value,
         verified_evidence=first.verified_evidence,
@@ -121,4 +121,4 @@ def test_draft_hash_is_stable_and_changes_when_reason_changes():
         transaction_date="2026-06-12",
         synthesis_summary="Customer does not recognize the charge.",
     )
-    assert rebuilt == first.draft_hash
+    assert rebuilt == first.evidence_hash

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from sqlalchemy import Engine, inspect
 
+from ..audit.lifecycle import DisputeLifecycleAuditService
 from ..audit.service import AuditService
 from ..config.settings import settings
 from ..domain.services.duplicate_charge import DuplicateChargeService
@@ -17,16 +18,18 @@ from ..domain.services.merchant_resolver import MerchantResolverService
 from ..llm.gemini_client import SynthesisClient
 from ..observability.tracing import TracingService, build_tracing_service
 from ..repositories.accounts import AccountRepository
-from ..repositories.approvals import ApprovalRepository
 from ..repositories.audit import AuditRepository
+from ..repositories.confirmations import ConfirmationRepository
+from ..repositories.dispute_audit import DisputeLifecycleAuditRepository
 from ..repositories.disputes import DisputeRepository
 from ..repositories.merchants import MerchantRepository
-from ..repositories.models import Base
+from ..repositories.schema import ensure_writable_schema
 from ..repositories.session import SessionFactory, build_engine, build_session_factory
 from ..repositories.transactions import TransactionRepository
 from ..workflows.checkpointer import build_sqlite_checkpointer, checkpoint_path_for_engine
 from ..workflows.dispute_case import DisputeWorkflowRunner
-from .approvals import ApprovalService
+from .cases import CaseService
+from .confirmations import ConfirmationService
 
 _DATASET_TABLES = frozenset({"customers", "accounts", "merchants", "transactions"})
 
@@ -41,13 +44,14 @@ class Container:
     transactions: TransactionRepository
     merchants: MerchantRepository
     audit: AuditService
+    lifecycle: DisputeLifecycleAuditService
     merchant_resolver: MerchantResolverService
     duplicates: DuplicateChargeService
     tracing: TracingService
     disputes: DisputeRepository
+    confirmations: ConfirmationService
     dispute_workflow: DisputeWorkflowRunner
-    approvals: ApprovalRepository
-    approval_service: ApprovalService
+    cases: CaseService
     synthesis: SynthesisClient | None = None
 
     def dataset_ready(self) -> bool:
@@ -65,27 +69,34 @@ def build_container_from_engine(
 ) -> Container:
     """Assemble a container around an existing engine."""
     session_factory = build_session_factory(engine)
-    # Audit events, approval records and registered dispute cases are the only
-    # tables the server writes; they are created on demand. The read-only catalog
-    # comes from the data generator.
-    Base.metadata.tables["audit_events"].create(bind=engine, checkfirst=True)
-    Base.metadata.tables["dispute_cases"].create(bind=engine, checkfirst=True)
-    Base.metadata.tables["approval_records"].create(bind=engine, checkfirst=True)
+    ensure_writable_schema(engine)
 
     accounts = AccountRepository(session_factory)
     transactions = TransactionRepository(session_factory)
     disputes = DisputeRepository(session_factory)
-    approvals = ApprovalRepository(session_factory)
+    confirmation_repository = ConfirmationRepository(session_factory)
+    lifecycle = DisputeLifecycleAuditService(DisputeLifecycleAuditRepository(session_factory))
     tracing_service = tracing or build_tracing_service()
     saver = checkpointer or build_sqlite_checkpointer(
         checkpoint_path if checkpoint_path is not None else checkpoint_path_for_engine(engine),
     )
     dispute_workflow = DisputeWorkflowRunner(
-        accounts=accounts,
-        transactions=transactions,
         disputes=disputes,
         checkpointer=saver,
         tracing=tracing_service,
+    )
+    confirmations = ConfirmationService(
+        confirmations=confirmation_repository,
+        accounts=accounts,
+        transactions=transactions,
+        disputes=disputes,
+        ttl_seconds=settings.confirmation_ttl_seconds,
+    )
+    cases = CaseService(
+        confirmations=confirmations,
+        disputes=disputes,
+        lifecycle=lifecycle,
+        workflow=dispute_workflow,
     )
     return Container(
         engine=engine,
@@ -94,17 +105,14 @@ def build_container_from_engine(
         transactions=transactions,
         merchants=MerchantRepository(session_factory),
         audit=AuditService(AuditRepository(session_factory)),
+        lifecycle=lifecycle,
         merchant_resolver=MerchantResolverService(),
         duplicates=DuplicateChargeService(),
         tracing=tracing_service,
         disputes=disputes,
+        confirmations=confirmations,
         dispute_workflow=dispute_workflow,
-        approvals=approvals,
-        approval_service=ApprovalService(
-            approvals=approvals,
-            workflow=dispute_workflow,
-            ttl_seconds=settings.approval_ttl_seconds,
-        ),
+        cases=cases,
         synthesis=synthesis,
     )
 

@@ -9,10 +9,10 @@ import pytest
 
 from src.app.validators import (
     MAX_MERCHANT_QUERY_LENGTH,
-    validate_decision_note,
     validate_investigation_findings,
     validate_merchant_query,
     validate_raw_descriptor,
+    validate_review_note,
     validate_synthesis_summary,
 )
 from src.contracts.requests import ResolveMerchantRequest, SearchTransactionsRequest, SynthesizeInvestigationRequest
@@ -177,7 +177,7 @@ def test_free_text_validators_reject_control_characters():
     with pytest.raises(InvalidInputError):
         validate_synthesis_summary("ok\x08bad")
     with pytest.raises(InvalidInputError):
-        validate_decision_note("note\x1bbad")
+        validate_review_note("note\x1bbad")
     assert validate_synthesis_summary("Line one.\nLine two.") == "Line one.\nLine two."
     assert validate_merchant_query("Riverbend") == "Riverbend"
     assert validate_merchant_query(None) is None

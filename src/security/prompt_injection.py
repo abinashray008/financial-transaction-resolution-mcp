@@ -18,8 +18,9 @@ _NEWLINE_CONTROLS = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 # High-signal attempts to steer the host agent rather than answer the customer.
 _HOST_AGENT_HIJACK = re.compile(
     r"(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above|system)\s+instructions"
-    r"|call\s+submit_dispute_(?:case|decision)"
-    r"|approved\s*=\s*true",
+    r"|call\s+(?:submit_dispute_(?:case|decision)|confirm_unrecognized_transaction|record_review_decision)"
+    r"|approved\s*=\s*true"
+    r"|skip\s+(?:the\s+)?(?:customer\s+)?confirmation",
     re.IGNORECASE,
 )
 

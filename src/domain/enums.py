@@ -43,16 +43,8 @@ class AuditOutcome(StrEnum):
     ERROR = "error"
 
 
-class DisputeWorkflowStatus(StrEnum):
-    """Where a human-in-the-loop dispute registration graph currently sits."""
-
-    PENDING_REVIEW = "pending_review"
-    REGISTERED = "registered"
-    DECLINED = "declined"
-
-
 class DisputeReasonCode(StrEnum):
-    """Deterministic reason assigned to a dispute draft from investigation findings."""
+    """Deterministic reason assigned to a dispute case from investigation findings."""
 
     UNRECOGNIZED_TRANSACTION = "UNRECOGNIZED_TRANSACTION"
     LIKELY_DUPLICATE = "LIKELY_DUPLICATE"
@@ -62,13 +54,71 @@ class DisputeReasonCode(StrEnum):
 
 
 class DisputeCaseStatus(StrEnum):
-    """Lifecycle of a registered synthetic dispute case file."""
+    """Lifecycle of an internal synthetic dispute case file."""
 
-    REGISTERED = "registered"
-
-
-class ApprovalDecision(StrEnum):
-    """Human decision stored on a minted approval record."""
-
+    PENDING_REVIEW = "pending_review"
     APPROVED = "approved"
-    DECLINED = "declined"
+    REJECTED = "rejected"
+
+
+class ReviewDecision(StrEnum):
+    """What an authenticated back-office reviewer decided about a pending case."""
+
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+
+    @property
+    def resulting_status(self) -> DisputeCaseStatus:
+        """Case status this decision moves a PENDING_REVIEW case to."""
+        if self is ReviewDecision.APPROVE:
+            return DisputeCaseStatus.APPROVED
+        return DisputeCaseStatus.REJECTED
+
+
+class ReviewReasonCode(StrEnum):
+    """Closed vocabulary a reviewer must pick from when recording a decision."""
+
+    CUSTOMER_CONFIRMATION_CLEAR = "CUSTOMER_CONFIRMATION_CLEAR"
+    EVIDENCE_SUPPORTS_DISPUTE = "EVIDENCE_SUPPORTS_DISPUTE"
+    POLICY_CRITERIA_MET = "POLICY_CRITERIA_MET"
+    EVIDENCE_INSUFFICIENT = "EVIDENCE_INSUFFICIENT"
+    MERCHANT_RECOGNIZED_ON_REVIEW = "MERCHANT_RECOGNIZED_ON_REVIEW"
+    POLICY_CRITERIA_NOT_MET = "POLICY_CRITERIA_NOT_MET"
+    DUPLICATE_CASE_REQUEST = "DUPLICATE_CASE_REQUEST"
+
+
+APPROVE_REASON_CODES = frozenset(
+    {
+        ReviewReasonCode.CUSTOMER_CONFIRMATION_CLEAR,
+        ReviewReasonCode.EVIDENCE_SUPPORTS_DISPUTE,
+        ReviewReasonCode.POLICY_CRITERIA_MET,
+    }
+)
+REJECT_REASON_CODES = frozenset(
+    {
+        ReviewReasonCode.EVIDENCE_INSUFFICIENT,
+        ReviewReasonCode.MERCHANT_RECOGNIZED_ON_REVIEW,
+        ReviewReasonCode.POLICY_CRITERIA_NOT_MET,
+        ReviewReasonCode.DUPLICATE_CASE_REQUEST,
+    }
+)
+
+
+class AuditActorType(StrEnum):
+    """Who caused a dispute lifecycle event, established by authentication."""
+
+    HOST_AGENT = "host_agent"
+    CUSTOMER = "customer"
+    REVIEWER = "reviewer"
+
+
+class DisputeLifecycleEvent(StrEnum):
+    """Distinct, semantically named events on the dispute lifecycle."""
+
+    INVESTIGATION_COMPLETED = "INVESTIGATION_COMPLETED"
+    CUSTOMER_CONFIRMATION_REQUESTED = "CUSTOMER_CONFIRMATION_REQUESTED"
+    CUSTOMER_CONFIRMED_UNRECOGNIZED = "CUSTOMER_CONFIRMED_UNRECOGNIZED"
+    DISPUTE_CASE_CREATED = "DISPUTE_CASE_CREATED"
+    REVIEW_STARTED = "REVIEW_STARTED"
+    REVIEW_APPROVED = "REVIEW_APPROVED"
+    REVIEW_REJECTED = "REVIEW_REJECTED"

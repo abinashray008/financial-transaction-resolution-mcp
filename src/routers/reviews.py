@@ -1,11 +1,10 @@
-"""Human review application for dispute drafts.
+"""Authenticated back-office review application for persisted dispute cases.
 
 These HTTP routes are not MCP tools. FastMCP's Descope middleware wraps ``/mcp``
-only, so both ``GET /reviews/{request_id}`` and
-``POST /reviews/{request_id}/decision`` authenticate here. A reviewer must
-present a verified JWT with the review scope; identity is taken from the
-``sub`` claim. Form and ``X-Reviewer-Id`` values are accepted only in
-``local-demo`` mode.
+only, so both ``GET /reviews/{case_id}`` and ``POST /reviews/{case_id}/decision``
+authenticate here. A reviewer must present a verified JWT with the review scope;
+identity is taken from the ``sub`` claim. Form and ``X-Reviewer-Id`` values are
+accepted only in ``local-demo`` mode. ``reviewer_id`` is never read from JSON.
 """
 
 from __future__ import annotations
@@ -18,9 +17,16 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from ..app.container import Container
-from ..app.presenters import to_approval_record, to_dispute_draft
-from ..app.validators import validate_decision_note, validate_request_id
-from ..domain.enums import ApprovalDecision
+from ..app.presenters import to_dispute_case_view, to_review_decision
+from ..app.validators import (
+    validate_case_id,
+    validate_case_version,
+    validate_review_decision,
+    validate_review_note,
+    validate_review_reason_code,
+)
+from ..contracts.requests import ReviewDecisionRequest
+from ..domain.enums import REJECT_REASON_CODES, ReviewDecision, ReviewReasonCode
 from ..domain.exceptions import DomainError, ErrorCode, InvalidInputError
 from ..security.reviewer import ReviewAuth, ReviewAuthError, authenticate_reviewer, reviewer_id_from_request
 
@@ -38,72 +44,85 @@ _PAGE_STYLE = (
 _HTTP_STATUS = {
     ErrorCode.INVALID_INPUT: 400,
     ErrorCode.DISPUTE_WORKFLOW_NOT_FOUND: 404,
-    ErrorCode.DISPUTE_NOT_AWAITING_APPROVAL: 409,
+    ErrorCode.DISPUTE_CASE_NOT_FOUND: 404,
+    ErrorCode.DISPUTE_NOT_AWAITING_REVIEW: 409,
     ErrorCode.DISPUTE_ALREADY_EXISTS: 409,
-    ErrorCode.DISPUTE_APPROVAL_NOT_FOUND: 404,
-    ErrorCode.DISPUTE_APPROVAL_EXPIRED: 409,
-    ErrorCode.DISPUTE_APPROVAL_ALREADY_CONSUMED: 409,
-    ErrorCode.DISPUTE_APPROVAL_MISMATCH: 409,
+    ErrorCode.DISPUTE_CASE_VERSION_CONFLICT: 409,
+    ErrorCode.DISPUTE_REVIEW_ALREADY_RECORDED: 409,
 }
 
 
 def register_review_routes(mcp: FastMCP, container: Container, *, review_auth: ReviewAuth) -> None:
-    """Expose ``GET /reviews/{request_id}`` and ``POST /reviews/{request_id}/decision``."""
+    """Expose ``GET /reviews/{case_id}`` and ``POST /reviews/{case_id}/decision``."""
 
-    @mcp.custom_route("/reviews/{request_id}", methods=["GET"], name="review_proposal")
-    async def review_proposal(request: Request) -> Response:
+    @mcp.custom_route("/reviews/{case_id}", methods=["GET"], name="review_case")
+    async def review_case(request: Request) -> Response:
         try:
             reviewer_id = await authenticate_reviewer(
                 request,
                 review_auth,
                 require_identity=not review_auth.is_local_demo,
             )
-            request_id = validate_request_id(request.path_params["request_id"])
-            proposal = container.dispute_workflow.get_pending(request_id)
+            case_id = validate_case_id(request.path_params["case_id"])
+            case = container.cases.get_for_review(
+                case_id,
+                reviewer_id=reviewer_id,
+                correlation_id=case_id,
+            )
+            snapshot = container.disputes.get_snapshot(case_id)
+            history = container.lifecycle.case_history(case_id)
         except ReviewAuthError as error:
             return _auth_error_response(request, error)
         except DomainError as error:
             return _error_response(request, error)
 
-        data = to_dispute_draft(proposal)
+        data = to_dispute_case_view(case, snapshot, history)
         if _wants_html(request):
             return HTMLResponse(
-                _proposal_html(
+                _case_html(
                     data.model_dump(mode="json"),
-                    request_id=request_id,
+                    case_id=case_id,
                     review_auth=review_auth,
                     reviewer_id=reviewer_id,
                 )
             )
         return JSONResponse(data.model_dump(mode="json"))
 
-    @mcp.custom_route("/reviews/{request_id}/decision", methods=["POST"], name="record_review_decision")
+    @mcp.custom_route("/reviews/{case_id}/decision", methods=["POST"], name="record_review_decision")
     async def record_review_decision(request: Request) -> Response:
         try:
             payload = await _decision_payload(request)
+            if request.headers.get("content-type", "").startswith("application/json") and "reviewer_id" in payload:
+                raise InvalidInputError("reviewer_id is not accepted in the decision body.")
+            raw_reviewer = payload.get("reviewer_id") if review_auth.is_local_demo else None
             reviewer_id = await reviewer_id_from_request(
                 request,
                 review_auth,
-                form_reviewer_id=payload.get("reviewer_id"),
+                form_reviewer_id=raw_reviewer if isinstance(raw_reviewer, str) else None,
             )
-            request_id = validate_request_id(request.path_params["request_id"])
-            decision = _parse_decision(payload.get("decision"))
-            note = validate_decision_note(payload.get("decision_note"))
-            record = container.approval_service.record_decision(
-                request_id=request_id,
-                reviewer_id=reviewer_id,
+            path_case_id = validate_case_id(request.path_params["case_id"])
+            decision_request = _review_decision_request(payload, path_case_id=path_case_id)
+            decision = validate_review_decision(decision_request.decision)
+            reason_code = validate_review_reason_code(decision_request.reason_code, decision=decision)
+            note = validate_review_note(decision_request.note)
+            updated = container.cases.record_review(
+                case_id=path_case_id,
+                expected_version=decision_request.expected_version,
                 decision=decision,
-                decision_note=note,
+                reason_code=reason_code,
+                note=note,
+                reviewer_id=reviewer_id,
+                correlation_id=path_case_id,
             )
         except ReviewAuthError as error:
             return _auth_error_response(request, error)
         except DomainError as error:
             return _error_response(request, error)
 
-        body = to_approval_record(record).model_dump(mode="json")
+        body = to_review_decision(updated).model_dump(mode="json")
         if _wants_html(request):
-            return HTMLResponse(_minted_html(body), status_code=201)
-        return JSONResponse(body, status_code=201)
+            return HTMLResponse(_decided_html(body), status_code=200)
+        return JSONResponse(body, status_code=200)
 
 
 def _is_browser_form(request: Request) -> bool:
@@ -120,23 +139,44 @@ def _wants_html(request: Request) -> bool:
     return "text/html" in accept
 
 
-async def _decision_payload(request: Request) -> dict[str, str]:
+async def _decision_payload(request: Request) -> dict[str, object]:
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
         raw = await request.json()
         if not isinstance(raw, dict):
             raise InvalidInputError("The decision body must be a JSON object.")
-        return {str(key): "" if value is None else str(value) for key, value in raw.items()}
+        return raw
     form = await request.form()
     return {key: str(value) for key, value in form.items() if isinstance(value, str)}
 
 
-def _parse_decision(value: str | None) -> ApprovalDecision:
-    candidate = (value or "").strip().lower()
+def _review_decision_request(payload: dict[str, object], *, path_case_id: str) -> ReviewDecisionRequest:
+    body = dict(payload)
+    body.pop("reviewer_id", None)
+    if "case_id" not in body:
+        body["case_id"] = path_case_id
+    if "note" not in body and "decision_note" in body:
+        body["note"] = body.pop("decision_note")
     try:
-        return ApprovalDecision(candidate)
-    except ValueError as error:
-        raise InvalidInputError("decision must be 'approved' or 'declined'.") from error
+        case_id = validate_case_id(str(body.get("case_id") or path_case_id))
+        request = ReviewDecisionRequest.model_validate(
+            {
+                "case_id": case_id,
+                "expected_version": validate_case_version(body.get("expected_version")),
+                "decision": body.get("decision"),
+                "reason_code": body.get("reason_code"),
+                "note": body.get("note"),
+            }
+        )
+    except InvalidInputError:
+        raise
+    except Exception as error:
+        raise InvalidInputError(
+            "The decision body must include case_id, expected_version, decision and reason_code."
+        ) from error
+    if request.case_id != path_case_id:
+        raise InvalidInputError("case_id in the body must match the URL.")
+    return request
 
 
 def _auth_error_response(request: Request, error: ReviewAuthError) -> Response:
@@ -169,28 +209,33 @@ def _error_response(request: Request, error: DomainError) -> Response:
     return JSONResponse(payload, status_code=status)
 
 
-def _proposal_html(
+def _case_html(
     data: dict[str, Any],
     *,
-    request_id: str,
+    case_id: str,
     review_auth: ReviewAuth,
     reviewer_id: str | None,
 ) -> str:
-    request_id = html.escape(request_id)
+    escaped_case_id = html.escape(case_id)
     rows = "".join(
         f"<dt>{html.escape(label)}</dt><dd>{html.escape(value)}</dd>"
         for label, value in (
+            ("Case", str(data["case_id"])),
+            ("Status", str(data["status"])),
+            ("Version", str(data["version"])),
             ("Transaction", str(data["transaction_id"])),
             ("Merchant", str(data["merchant_display_name"])),
             ("Amount", f"{data['amount']} {data['currency']}"),
-            ("Date", str(data["transaction_date"])),
             ("Reason code", str(data["reason_code"])),
             ("Policy", str(data["applied_policy"])),
             ("Proposed action", str(data["proposed_action"])),
-            ("Draft hash", str(data["draft_hash"])),
+            ("Evidence hash", str(data["evidence_hash"])),
             ("Verified evidence", "; ".join(data["verified_evidence"]) or "None"),
             ("Missing evidence", "; ".join(data["missing_evidence"]) or "None"),
         )
+    )
+    reason_options = "".join(
+        f"<option value='{html.escape(code.value)}'>{html.escape(code.value)}</option>" for code in ReviewReasonCode
     )
     if review_auth.is_local_demo:
         reviewer_field = (
@@ -202,12 +247,15 @@ def _proposal_html(
             "that is not authenticated. Do not use this outside a local demo.</p>"
         )
         form = (
-            f"<form method='post' action='/reviews/{request_id}/decision'>"
+            f"<form method='post' action='/reviews/{escaped_case_id}/decision'>"
+            f"<input type='hidden' name='case_id' value='{escaped_case_id}'>"
+            f"<input type='hidden' name='expected_version' value='{html.escape(str(data['version']))}'>"
             "<label>Decision <select name='decision' required>"
-            "<option value='approved'>Approve</option>"
-            "<option value='declined'>Decline</option>"
+            f"<option value='{ReviewDecision.APPROVE.value}'>Approve</option>"
+            f"<option value='{ReviewDecision.REJECT.value}'>Reject</option>"
             "</select></label>"
-            "<label>Note <textarea name='decision_note' rows='3' maxlength='500'></textarea></label>"
+            f"<label>Reason code <select name='reason_code' required>{reason_options}</select></label>"
+            "<label>Note <textarea name='note' rows='3' maxlength='500'></textarea></label>"
             f"{reviewer_field}"
             "<div><button type='submit'>Record decision</button></div>"
             "</form>"
@@ -222,32 +270,31 @@ def _proposal_html(
         )
         form = ""
     reason = html.escape(str(data["reason"]))
+    reject_hint = ", ".join(code.value for code in sorted(REJECT_REASON_CODES, key=lambda item: item.value))
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-        f"<title>Review dispute draft</title><style>{_PAGE_STYLE}</style></head><body>"
-        "<h1>Review dispute draft</h1>"
-        "<p>Record your decision here. The server will mint a one-time "
-        "<code>approval_id</code>. Passing <code>approved=true</code> to the MCP tool is not enough.</p>"
+        f"<title>Review dispute case</title><style>{_PAGE_STYLE}</style></head><body>"
+        "<h1>Review dispute case</h1>"
+        "<p>This internal case is already persisted at <code>PENDING_REVIEW</code>. "
+        "Approve or reject it here. Nothing is submitted to an issuer or card network.</p>"
         f"{auth_note}"
         f"<dl>{rows}</dl>"
         f"<p><strong>Reason</strong></p><p>{reason}</p>"
+        f"<p>Reject reason codes include: {html.escape(reject_hint)}.</p>"
         f"{form}</body></html>"
     )
 
 
-def _minted_html(data: dict[str, Any]) -> str:
-    approval_id = html.escape(str(data["approval_id"]))
-    request_id = html.escape(str(data["request_id"]))
-    decision = html.escape(str(data["decision"]))
-    expires = html.escape(str(data["expires_at"]))
+def _decided_html(data: dict[str, Any]) -> str:
+    case_id = html.escape(str(data["case_id"]))
+    status = html.escape(str(data["status"]))
+    reason_code = html.escape(str(data["reason_code"]))
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-        f"<title>Approval minted</title><style>{_PAGE_STYLE}</style></head><body>"
+        f"<title>Decision recorded</title><style>{_PAGE_STYLE}</style></head><body>"
         "<h1>Decision recorded</h1>"
-        f"<p>Decision: <code>{decision}</code></p>"
-        f"<p>Give the host this one-time token for <code>submit_dispute_case</code>:</p>"
-        f"<p><code>request_id</code>: {request_id}<br>"
-        f"<code>approval_id</code>: {approval_id}</p>"
-        f"<p>Expires at {expires}. It can be used once.</p>"
+        f"<p>Case <code>{case_id}</code> is now <code>{status}</code> "
+        f"(<code>{reason_code}</code>).</p>"
+        "<p>This is an internal synthetic case file. It was not submitted externally.</p>"
         "</body></html>"
     )
