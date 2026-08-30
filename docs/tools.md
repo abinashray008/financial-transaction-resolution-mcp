@@ -63,7 +63,8 @@ account data.
 ### `confirm_unrecognized_transaction`
 
 Extra fields are forbidden. The only proof accepted is the server-issued
-`confirmation_token`. Repeating the same `idempotency_key` returns the same
-case. `approved=true` is not a parameter and is not accepted.
+`confirmation_token`, and only after the policy's post_synthesis customer answer.
+Repeating the same `idempotency_key` returns the same case. `approved=true` is
+not a parameter and is not accepted.
 
 Typed request and response models live in `src/contracts/`.

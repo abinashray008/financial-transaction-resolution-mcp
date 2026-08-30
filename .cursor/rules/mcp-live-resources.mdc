@@ -1,0 +1,18 @@
+---
+description: Always use live MCP policy resources; Cursor catalog cache can be stale after reconnect
+alwaysApply: true
+---
+
+# Live MCP catalog
+
+Cursor may cache this server's instructions, tool descriptions, and prompt text
+across MCP reconnects. Resource reads are live.
+
+- After restart or before an investigation, read the matching policy URI from
+  the MCP server (`policy://disputes/unrecognized-transaction`,
+  `policy://fees/foreign-transaction`, or `policy://fees/late-payment`).
+- Apply the live JSON. If cached instructions disagree, follow the resource.
+- Unrecognized policy is fresh only when `version` is `1.2` and
+  `post_synthesis.likely_duplicate` asks whether the customer contacted the
+  merchant.
+- Do not invent confirmation tokens or treat `approved=true` as proof.

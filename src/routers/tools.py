@@ -247,7 +247,8 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
             Field(
                 description=(
                     "One-time token issued by synthesize_investigation. Present it only after the "
-                    "customer has explicitly confirmed they do not recognize the charge."
+                    "policy's post_synthesis customer answer (merchant contact for a likely duplicate, "
+                    "or explicit non-recognition otherwise)."
                 ),
             ),
         ],
@@ -260,8 +261,8 @@ def register_mcp_tools(mcp: FastMCP, container: Container) -> None:
             ),
         ],
     ) -> DisputeCaseCreatedResponse:
-        """Create an internal PENDING_REVIEW dispute case after the customer confirms they do not
-        recognize the charge. The server verifies confirmation_token; it does not accept an LLM
+        """Create an internal PENDING_REVIEW dispute case after the policy's post_synthesis
+        customer answer. The server verifies confirmation_token; it does not accept an LLM
         approval flag. Returns the case_id and a 10-business-day investigation message. The case is
         queued for authenticated back-office review and is not submitted to an issuer.
         """

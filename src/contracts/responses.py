@@ -204,7 +204,8 @@ class ConfirmationChallengeData(_Payload):
     confirmation_token: str = Field(
         description=(
             "One-time token to pass to confirm_unrecognized_transaction, and only after the "
-            "customer explicitly confirms they do not recognize the charge."
+            "policy's post_synthesis customer answer (merchant contact for a likely duplicate, "
+            "or explicit non-recognition otherwise)."
         ),
     )
     expires_at: datetime = Field(description="After this instant the token is refused and synthesis must be re-run.")

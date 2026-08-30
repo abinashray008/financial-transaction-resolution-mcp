@@ -107,7 +107,8 @@ class ConfirmUnrecognizedTransactionRequest(BaseModel):
     confirmation_token: str = Field(
         description=(
             "One-time token issued by synthesize_investigation. Present it only after the "
-            "customer has explicitly confirmed they do not recognize the charge."
+            "policy's post_synthesis customer answer (merchant contact for a likely duplicate, "
+            "or explicit non-recognition otherwise)."
         ),
     )
     idempotency_key: str = Field(

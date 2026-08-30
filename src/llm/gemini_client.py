@@ -59,7 +59,8 @@ Write a clear response for the end user that:
 5. Explains merchant resolution, duplicate findings, or fee rules using the tool evidence and the
    trusted policy — do not invent scores, rates, or rules.
 6. Lists what is still unknown and recommends exactly one concrete next investigative step, saying
-   who would perform it, consistent with the policy.
+   who would perform it, consistent with the policy. Do not ask whether they contacted the merchant
+   or whether they recognize the charge; the host agent asks those questions after this reply.
 7. Reminds the reader briefly that the data and policies are synthetic/fictional when it helps set
    expectations.
 
@@ -69,8 +70,10 @@ Keep the reply concise and satisfactory for a support-style conversation.
 Return JSON that matches the required schema:
 - customer_response: the customer-facing reply following the rules above.
 - recommended_action: exactly one of NO_ACTION (investigation complete, no dispute warranted),
-  REQUEST_MORE_INFORMATION (evidence is incomplete), or REQUEST_CUSTOMER_CONFIRMATION (ask the
-  customer whether they recognize the charge; this is not confirmation and not approval to file).
+  REQUEST_MORE_INFORMATION (evidence is incomplete), or REQUEST_CUSTOMER_CONFIRMATION (the host will
+  ask the policy's next customer question: merchant contact for a likely duplicate, or recognition
+  otherwise; this is not confirmation and not approval to file). Use REQUEST_CUSTOMER_CONFIRMATION
+  when a likely duplicate may lead to a case after the customer confirms they contacted the merchant.
 """
 
 
