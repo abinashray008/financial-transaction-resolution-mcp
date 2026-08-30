@@ -100,6 +100,7 @@ def test_synthesize_investigation_uses_injected_client(synthesis_container):
     assert response.data.confirmation is not None
     assert response.data.confirmation.confirmation_token.startswith("cnf_")
     assert response.data.confirmation.next_tool == "confirm_unrecognized_transaction"
+    assert "contacted the merchant" in response.data.confirmation.message
     assert len(fake.calls) == 1
     assert fake.calls[0]["account_id"] == SCENARIO_ACCOUNT
     assert fake.calls[0]["transaction_id"] == "TXN-SCN-DUP-A"

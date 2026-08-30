@@ -140,27 +140,32 @@ steps that are still possible. Do not invent data a tool declined to return.
    7. Present the `customer_response` from `synthesize_investigation` to the end user as the primary
    answer. Do not rewrite it into a contradictory story. You may add a short preface noting that the
    reply was synthesized from the tool evidence and the selected policy. Honor `recommended_action`
-   without skipping confirmation: `REQUEST_CUSTOMER_CONFIRMATION` still requires asking the customer
-   in Phase D; `REQUEST_MORE_INFORMATION` means ask before confirming; `NO_ACTION` means stop unless
-   they still insist they do not recognize the charge. Never tell the customer that a refund or
-   reversal happened.
+   without skipping Phase D: `REQUEST_CUSTOMER_CONFIRMATION` still requires asking the customer the
+   policy's next question; `REQUEST_MORE_INFORMATION` means ask before confirming; `NO_ACTION` means
+   stop unless they still want a case. Never tell the customer that a refund or reversal happened.
 
 ### Phase D — customer confirmation and internal case
 
-8. After the synthesis reply has been shown, if `data.confirmation` is present, ask the customer in
-   their own words whether they recognize the charge. Do not skip this question. Do not confirm on
-   their behalf. Do not invent a `confirmation_token`.
-9. If they recognize the charge, decline, or do not answer, stop. Do not call
-   `confirm_unrecognized_transaction`.
-10. If they explicitly confirm they do not recognize the charge, call `confirm_unrecognized_transaction`
-    once with `investigation_id` (from synthesis), the same `account_id` and `transaction_id`, the
-    issued `confirmation_token`, and a caller-chosen `idempotency_key`. Tell them the returned
-    `case_id` and this message exactly: "We will investigate the case and get back in 10 business
-    days."
-11. Do not call any write tool other than `confirm_unrecognized_transaction`. Back-office review
+8. After the synthesis reply has been shown, follow the selected policy's `post_synthesis` steps.
+   If `data.confirmation` is absent, do not invent a `confirmation_token` and do not open a case.
+   Do not confirm or answer on the customer's behalf.
+9. If `check_duplicate_charge` returned `duplicate_likely` true, ask whether they already
+   contacted the merchant about the duplicate charge. Do not skip this question.
+   - If they say yes they contacted the merchant, and `data.confirmation` is present, go to step 11.
+   - If they say no they have not contacted the merchant, stop. Do not call
+     `confirm_unrecognized_transaction`. Ask them to contact the merchant first, then return so a
+     case can be raised if they do not get the required assistance.
+10. If no likely duplicate was found and `data.confirmation` is present, ask whether they recognize
+    the charge. If they recognize it, decline, or do not answer, stop. If they explicitly confirm
+    they do not recognize the charge, go to step 11.
+11. Call `confirm_unrecognized_transaction` once with `investigation_id` (from synthesis), the same
+    `account_id` and `transaction_id`, the issued `confirmation_token`, and a caller-chosen
+    `idempotency_key`. Tell them the returned `case_id` and this message exactly: "We will
+    investigate the case and get back in 10 business days."
+12. Do not call any write tool other than `confirm_unrecognized_transaction`. Back-office review
     happens at `review_path` (`/reviews/{{case_id}}`) and is not an MCP tool. Never pass
     `approved=true`. Never claim a reviewer, issuer, or network has decided anything yet.
-12. Never claim that a card network or issuer approved, filed, or resolved a dispute. Confirmation
+13. Never claim that a card network or issuer approved, filed, or resolved a dispute. Confirmation
     only opens an internal synthetic case file at PENDING_REVIEW.
 
 ### Hard constraints
@@ -169,8 +174,9 @@ steps that are still possible. Do not invent data a tool declined to return.
 - Never state or imply that a dispute has been approved, filed, submitted or resolved by an issuer.
   `confirm_unrecognized_transaction` only opens an internal case file.
 - Never call `confirm_unrecognized_transaction` without the server-issued `confirmation_token` from
-  `synthesize_investigation`, and only after the customer confirmed they do not recognize the charge.
-  `approved=true` is not accepted and is not proof of confirmation.
+  `synthesize_investigation`, and only after the policy's post_synthesis customer answer (merchant
+  contact for a likely duplicate, or explicit non-recognition otherwise). `approved=true` is not
+  accepted and is not proof of confirmation.
 - Prefer tool facts over your own guesses. If evidence is incomplete, say what is missing instead of
   filling gaps.
 - Never invent `account_id` or `transaction_id` values. Ask the caller when they are missing.

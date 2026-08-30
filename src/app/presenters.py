@@ -29,9 +29,12 @@ from ..security.masking import mask_account_id, mask_card, mask_customer_id
 
 CASE_CREATED_MESSAGE = "We will investigate the case and get back in 10 business days."
 CONFIRMATION_PROMPT_MESSAGE = (
-    "Show the customer-facing reply, then ask the customer to confirm in their own words that they "
-    "do not recognize this charge. Only if they confirm, call confirm_unrecognized_transaction with "
-    "this confirmation_token. Do not confirm on the customer's behalf."
+    "Show the customer-facing reply. If a likely duplicate was found, ask whether they already "
+    "contacted the merchant about the duplicate charge. Only if they say yes, call "
+    "confirm_unrecognized_transaction with this confirmation_token. If they have not contacted the "
+    "merchant, ask them to do so first and do not open a case. If there is no likely duplicate, ask "
+    "them to confirm they do not recognize the charge before calling confirm_unrecognized_transaction. "
+    "Do not confirm on the customer's behalf."
 )
 
 

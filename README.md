@@ -44,16 +44,18 @@ customer-facing language. Server-side authorization controls case creation and r
 
 ▶️ [Watch the demo](demo/financial-transaction-resolution-demo.mp4)
 
+The demo video follows a live unrecognized-charge investigation of `TXN-INT-0002`
+on `ACCT-0133`. The host maps that concern to policy 1.2, gathers account-scoped
+evidence, identifies a same-day duplicate at Lumen Streaming (`TXN-INT-0001`),
+asks whether the customer already contacted the merchant, and opens
+`DSP-D8CF82D7` at `PENDING_REVIEW` only after that yes.
+
 Example request:
 
-> Customer does not recognize transaction `TXN-SCN-DUP-A` on `ACCT-0001`.
+> Investigate TXN-INT-0002 on Acct-0133
 
-The server gathers account-scoped evidence, identifies a likely duplicate, generates a grounded
-explanation, and creates a reviewable dispute case only after explicit customer confirmation.
-That seeded scenario is a same-day double post at Halcyon Electronics
-(`TXN-SCN-DUP-A` / `TXN-SCN-DUP-B`).
-
-A tool-by-tool walkthrough of this scenario and others is in the
+A tool-by-tool walkthrough of this flow and the seeded Halcyon pair
+(`TXN-SCN-DUP-A` / `TXN-SCN-DUP-B`) is in the
 [demo guide](docs/demo-guide.md).
 
 ## Key Capabilities
@@ -152,9 +154,13 @@ flowchart TD
   D --> E[Gather evidence with read-only tools]
   E --> F[synthesize_investigation via Gemini]
   F --> G[Show customer-facing reply]
-  G --> H{Customer confirms they do not recognize the charge?}
-  H -->|No| I[Stop]
-  H -->|Yes| J[confirm_unrecognized_transaction]
+  G --> H{Likely duplicate?}
+  H -->|Yes| N{Customer contacted the merchant?}
+  N -->|No| O[Ask them to contact the merchant first]
+  N -->|Yes| J[confirm_unrecognized_transaction]
+  H -->|No| P{Customer confirms they do not recognize the charge?}
+  P -->|No| I[Stop]
+  P -->|Yes| J
   J --> K[PENDING_REVIEW case]
   K --> L[Authenticated reviewer at /reviews/case_id]
   L --> M[APPROVE or REJECT]
@@ -163,8 +169,10 @@ flowchart TD
 The host starts from the `investigate_transaction` prompt. If identifiers are missing, the prompt
 tells the agent to stop and ask. The agent then reads one policy resource, calls the evidence tools,
 and finishes with `synthesize_investigation`. Evidence analysis never calls a model. Eligible
-replies include a one-time `confirmation_token`. After the customer explicitly confirms they do not
-recognize the charge, `confirm_unrecognized_transaction` writes a `PENDING_REVIEW` case and an
+replies include a one-time `confirmation_token`. For a likely duplicate, the host asks whether the
+customer already contacted the merchant; a case is opened only if they say yes. Otherwise the host
+asks them to confirm they do not recognize the charge. Then `confirm_unrecognized_transaction`
+writes a `PENDING_REVIEW` case and an
 immutable evidence snapshot, then LangGraph pauses for authenticated review at `/reviews/{case_id}`.
 Reviewer identity comes from a verified JWT (`sub` plus `dispute:review`); `reviewer_id` is not
 accepted in the JSON body.

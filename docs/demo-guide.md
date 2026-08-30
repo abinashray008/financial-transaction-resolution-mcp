@@ -4,8 +4,15 @@ Use these from Cursor (or another MCP client) after the server is connected.
 Reuse one `request_id` across a whole investigation. Scenario ids are from the
 seed-42 dataset; see [dataset.md](dataset.md).
 
+The recorded demo walks the live unrecognized-charge loop for `TXN-INT-0002` on
+`ACCT-0133` (Lumen Streaming $21.35, likely duplicate `TXN-INT-0001`, merchant
+contact, then case `DSP-D8CF82D7`). The seeded Halcyon pair below is the same
+policy path with fixed ids.
+
 ```text
 # Example 1: investigate_transaction prompt (user-feedback + full loop)
+Investigate TXN-INT-0002 on Acct-0133
+# or the seeded pair:
 Customer doesn't recognize TXN-SCN-DUP-A on ACCT-0001
 
 # Example 2: get_account_summary
@@ -23,8 +30,8 @@ Is TXN-SCN-DUP-A on ACCT-0001 a duplicate?
 # Example 6: contrast — expected repeat, not a duplicate
 Check TXN-SCN-HOLD-02 on ACCT-0001 (hotel hold vs posted settlement)
 
-# Example 7: after synthesis, customer-confirmed dispute case
-The customer does not recognize TXN-SCN-DUP-A on ACCT-0001 and confirms that after the Gemini reply
+# Example 7: after synthesis, customer already contacted the merchant
+The customer does not recognize TXN-SCN-DUP-A on ACCT-0001 and already contacted the merchant
 ```
 
 ## Expected highlights for the duplicate scenario
@@ -39,9 +46,9 @@ The customer does not recognize TXN-SCN-DUP-A on ACCT-0001 and confirms that aft
    `TXN-SCN-DUP-B`.
 5. `get_audit_trace` → tool names, timestamps, masked account, outcome,
    duration. No arguments or names.
-6. After synthesis, show the reply. If `confirmation` is present and the
-   customer confirms they do not recognize the charge,
-   `confirm_unrecognized_transaction` → `PENDING_REVIEW` with a `DSP-…`
+6. After synthesis, show the reply. This scenario is a likely duplicate, so ask
+   whether they already contacted the merchant. If they say yes and `confirmation`
+   is present, `confirm_unrecognized_transaction` → `PENDING_REVIEW` with a `DSP-…`
    `case_id` and “We will investigate the case and get back in 10 business days.”
 7. An authenticated reviewer records APPROVE or REJECT at `/reviews/{case_id}`
    with `expected_version`. That updates the existing case. `approved=true` is

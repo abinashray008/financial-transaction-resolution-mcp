@@ -104,6 +104,7 @@ async def test_the_prompt_renders_the_investigation_workflow(server):
     assert "confirmation_token" in rendered
     assert "Operating loop" in rendered
     assert "Phase D" in rendered
+    assert "contacted the merchant about the duplicate charge" in rendered
     assert "policy://disputes/unrecognized-transaction" in rendered
     assert "policy://fees/foreign-transaction" in rendered
     assert "policy://fees/late-payment" in rendered
@@ -170,7 +171,11 @@ async def test_policy_resources_return_synthetic_guidance(server):
         late_fee = json.loads((await client.read_resource("policy://fees/late-payment"))[0].text)
 
     assert unrecognized["policy_id"] == "POL-DSP-UNREC-001"
+    assert unrecognized["version"] == "1.2"
     assert "fictional" in unrecognized["disclaimer"]
+    assert "post_synthesis" in unrecognized
+    assert "contacted the merchant" in unrecognized["post_synthesis"]["likely_duplicate"]["ask"]
+    assert "do not open a case" in unrecognized["post_synthesis"]["likely_duplicate"]["if_no"]
     assert foreign_fee["fee_rule"]["assessment_rate"] == "0.0275"
     assert late_fee["fee_rule"]["flat_fee_amount"] == "39.00"
 
